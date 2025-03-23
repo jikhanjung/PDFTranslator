@@ -14,6 +14,8 @@ import time
 import json
 import keyring  # For secure storage of API key
 from fpdf import FPDF  # Replace with fpdf2 for better Unicode support
+import logging
+from datetime import datetime
 
 # Load environment variables for API keys
 load_dotenv()
@@ -30,6 +32,27 @@ try:
 except:
     # If we can't determine version, assume old version
     is_new_version = False
+
+def setup_logging():
+    """Set up logging configuration"""
+    # Create logs directory if it doesn't exist
+    if not os.path.exists('logs'):
+        os.makedirs('logs')
+        
+    # Use date in filename to create a new log file each day
+    log_filename = f"logs/pdf_translator_{datetime.now().strftime('%Y-%m-%d')}.log"
+    
+    # Configure logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S',
+        filename=log_filename,
+        filemode='a'  # Append mode
+    )
+    
+    logging.info("=== Application Started ===")
+    return logging.getLogger('PDFTranslator')
 
 # Create a worker thread for background translation
 class TranslationWorker(QThread):
@@ -59,12 +82,14 @@ class TranslationWorker(QThread):
             
             # Prepare the messages for GPT
             messages = [
-                #{"role": "system", "content": f"You are a professional translator. Translate the provided text from {self.input_language} to {self.output_language_name} accurately while maintaining the original meaning and context."},
                 {"role": "system", "content": f"You are a professional Korean translator. Translate the following {self.input_language} text into fluent and natural {self.output_language_name}. Use appropriate academic tone and accurate terminology."},
-
-
                 {"role": "user", "content": f"Translate the following text to {self.output_language_name}:\n\n{self.text}"}
             ]
+            
+            # Log the API request (truncate text if too long to avoid huge log files)
+            display_text = self.text[:200] + "..." if len(self.text) > 200 else self.text
+            logger.info(f"API Request - Page {self.page_num+1} - {self.input_language} to {self.output_language_name} - Model: {self.model}")
+            logger.debug(f"Full request: {messages}")
             
             # Call OpenAI API
             if is_new_version:
@@ -85,11 +110,19 @@ class TranslationWorker(QThread):
                     max_tokens=2000
                 )
                 translated = response.choices[0].message['content'].strip()
-                
+            
+            # Log the API response (truncate if too long)
+            display_translated = translated[:200] + "..." if len(translated) > 200 else translated
+            logger.info(f"API Response - Page {self.page_num+1} - Success - Length: {len(translated)} chars")
+            logger.debug(f"Full response: {display_translated}")
+            
             # Emit signal with translation results
             self.translationComplete.emit(translated, self.page_num, self.output_language_name)
             
         except Exception as e:
+            # Log the error
+            logger.error(f"Translation error on page {self.page_num+1}: {str(e)}")
+            
             if self.is_running:  # Only emit signal if thread hasn't been terminated
                 self.translationComplete.emit(f"Translation error: {str(e)}", self.page_num, self.output_language_name)
     
@@ -165,6 +198,7 @@ class TranslationProgressBar(QWidget):
         self.translated_pages = set()  # Set of translated page indices
         self.translating_pages = set()  # Set of pages currently being translated
         self.current_page = 0
+        self.aggregation_factor = 1  # How many pages are represented by one pixel
         
         # Set background to a light gray
         self.setAutoFillBackground(True)
@@ -178,6 +212,17 @@ class TranslationProgressBar(QWidget):
         self.translated_pages = set()
         self.translating_pages = set()
         self.current_page = 0
+        
+        # Calculate aggregation factor based on widget width and total pages
+        if total_pages > 0:
+            # Estimate available pixels (width - 2 for borders)
+            available_pixels = self.width() - 2
+            # If we have more pages than pixels, we need to aggregate
+            if total_pages > available_pixels:
+                self.aggregation_factor = max(1, (total_pages + available_pixels - 1) // available_pixels)
+            else:
+                self.aggregation_factor = 1
+                
         self.update()
         
     def mark_page_translated(self, page_num):
@@ -211,6 +256,43 @@ class TranslationProgressBar(QWidget):
         self.translated_pages = set()
         self.translating_pages = set()
         self.current_page = 0
+        self.aggregation_factor = 1
+        self.update()
+        
+    def get_page_group_status(self, group_start, group_end):
+        """Determine the status of a group of pages (for aggregation)"""
+        # Count pages in each state within this group
+        translated_count = 0
+        translating_count = 0
+        total_count = min(group_end - group_start, self.total_pages - group_start)
+        
+        for i in range(group_start, min(group_end, self.total_pages)):
+            if i in self.translated_pages:
+                translated_count += 1
+            elif i in self.translating_pages:
+                translating_count += 1
+        
+        # Determine dominant status based on thresholds
+        # If more than 50% of pages in group are translated, consider the group translated
+        if translated_count > total_count * 0.5:
+            return "translated"
+        # If more than 25% of pages are being translated (and not already considered translated), mark as translating
+        elif translating_count > total_count * 0.25:
+            return "translating"
+        # Otherwise, the group is predominantly untranslated
+        else:
+            return "untranslated"
+    
+    def resizeEvent(self, event):
+        """Handle resize events to recalculate aggregation"""
+        super().resizeEvent(event)
+        # Recalculate aggregation factor when the widget is resized
+        if self.total_pages > 0:
+            available_pixels = self.width() - 2
+            if self.total_pages > available_pixels:
+                self.aggregation_factor = max(1, (self.total_pages + available_pixels - 1) // available_pixels)
+            else:
+                self.aggregation_factor = 1
         self.update()
         
     def paintEvent(self, event):
@@ -228,40 +310,83 @@ class TranslationProgressBar(QWidget):
         painter.setPen(Qt.darkGray)
         painter.drawRect(0, 0, width - 1, height - 1)
         
-        # Calculate exact width for each block
-        block_width = (width - 2) / self.total_pages
+        # Available width for blocks (accounting for borders)
+        available_width = width - 2
         
-        # Draw blocks for all pages based on their status
-        painter.setPen(Qt.NoPen)
-        
-        # First draw all untranslated pages in red
-        for i in range(self.total_pages):
-            if i not in self.translated_pages and i not in self.translating_pages:
-                x = 1 + (i * block_width)
-                painter.fillRect(int(x), 1, int(block_width) + 1, height - 2, QColor(220, 0, 0))  # Red
-        
-        # Then draw all translated pages in green
-        for i in range(self.total_pages):
-            if i in self.translated_pages:
-                x = 1 + (i * block_width)
-                painter.fillRect(int(x), 1, int(block_width) + 1, height - 2, QColor(0, 180, 0))  # Green
-        
-        # Then draw all currently translating pages in yellow
-        for i in range(self.total_pages):
-            if i in self.translating_pages:
-                x = 1 + (i * block_width)
-                painter.fillRect(int(x), 1, int(block_width) + 1, height - 2, QColor(255, 215, 0))  # Gold/Yellow
-        
-        # Draw the current page indicator with a blue border
-        if 0 <= self.current_page < self.total_pages:
-            x = 1 + (self.current_page * block_width)
-            painter.setPen(QPen(QColor(0, 0, 255), 1))  # Blue, 1px width
-            painter.setBrush(Qt.NoBrush)
-            painter.drawRect(int(x), 1, int(block_width), height - 2)
+        # If aggregation is needed (more pages than pixels)
+        if self.aggregation_factor > 1:
+            # Calculate how many "groups" of pages we'll display
+            num_groups = (self.total_pages + self.aggregation_factor - 1) // self.aggregation_factor
+            block_width = available_width / num_groups
+            
+            # Draw each group
+            painter.setPen(Qt.NoPen)
+            for g in range(num_groups):
+                group_start = g * self.aggregation_factor
+                group_end = min((g + 1) * self.aggregation_factor, self.total_pages)
+                
+                # Get the status of this group
+                group_status = self.get_page_group_status(group_start, group_end)
+                
+                # Determine color based on status
+                if group_status == "translated":
+                    color = QColor(0, 180, 0)  # Green
+                elif group_status == "translating":
+                    color = QColor(255, 215, 0)  # Gold/Yellow
+                else:
+                    color = QColor(220, 0, 0)  # Red
+                
+                # Calculate x position and draw the block
+                x = 1 + (g * block_width)
+                painter.fillRect(int(x), 1, int(block_width) + 1, height - 2, color)
+                
+            # Show current page indicator
+            if 0 <= self.current_page < self.total_pages:
+                current_group = self.current_page // self.aggregation_factor
+                x = 1 + (current_group * block_width)
+                painter.setPen(QPen(QColor(0, 0, 255), 1))  # Blue, 1px width
+                painter.setBrush(Qt.NoBrush)
+                painter.drawRect(int(x), 1, int(block_width), height - 2)
+                
+        else:
+            # Original drawing logic for when we have enough pixels for each page
+            block_width = available_width / self.total_pages
+            
+            # Draw blocks for all pages based on their status
+            painter.setPen(Qt.NoPen)
+            
+            # First draw all untranslated pages in red
+            for i in range(self.total_pages):
+                if i not in self.translated_pages and i not in self.translating_pages:
+                    x = 1 + (i * block_width)
+                    painter.fillRect(int(x), 1, int(block_width) + 1, height - 2, QColor(220, 0, 0))  # Red
+            
+            # Then draw all translated pages in green
+            for i in range(self.total_pages):
+                if i in self.translated_pages:
+                    x = 1 + (i * block_width)
+                    painter.fillRect(int(x), 1, int(block_width) + 1, height - 2, QColor(0, 180, 0))  # Green
+            
+            # Then draw all currently translating pages in yellow
+            for i in range(self.total_pages):
+                if i in self.translating_pages:
+                    x = 1 + (i * block_width)
+                    painter.fillRect(int(x), 1, int(block_width) + 1, height - 2, QColor(255, 215, 0))  # Gold/Yellow
+            
+            # Draw the current page indicator with a blue border
+            if 0 <= self.current_page < self.total_pages:
+                x = 1 + (self.current_page * block_width)
+                painter.setPen(QPen(QColor(0, 0, 255), 1))  # Blue, 1px width
+                painter.setBrush(Qt.NoBrush)
+                painter.drawRect(int(x), 1, int(block_width), height - 2)
 
 class PDFViewer(QMainWindow):
     def __init__(self):
         super().__init__()
+        
+        # Set up logging
+        global logger
+        logger = setup_logging()
         
         self.current_page = 0
         self.doc = None
@@ -346,6 +471,17 @@ class PDFViewer(QMainWindow):
         self.model_combo.addItem("GPT-4 Turbo", "gpt-4-turbo")
         self.model_combo.setToolTip("Select the AI model for translation")
         
+        # Add debug level selection combo box
+        self.debug_level_combo = QComboBox()
+        self.debug_level_combo.addItem("Error", logging.ERROR)
+        self.debug_level_combo.addItem("Warning", logging.WARNING)
+        self.debug_level_combo.addItem("Info", logging.INFO)
+        self.debug_level_combo.addItem("Debug", logging.DEBUG)
+        self.debug_level_combo.setToolTip("Set logging verbosity level")
+        
+        # Connect debug level change signal
+        self.debug_level_combo.currentIndexChanged.connect(self.on_debug_level_changed)
+        
         # Add translate button
         self.translate_btn = QPushButton('Translate')
         self.translate_btn.clicked.connect(lambda: self.translate_text(True))  # Force new translation when button clicked
@@ -372,6 +508,8 @@ class PDFViewer(QMainWindow):
         btn_layout.addWidget(self.output_language_combo)
         btn_layout.addWidget(QLabel("Model:"))
         btn_layout.addWidget(self.model_combo)
+        btn_layout.addWidget(QLabel("Debug:"))
+        btn_layout.addWidget(self.debug_level_combo)
         btn_layout.addWidget(self.translate_btn)
         btn_layout.addWidget(self.translate_all_btn)
         btn_layout.addWidget(self.export_btn)
@@ -461,6 +599,9 @@ class PDFViewer(QMainWindow):
         file_path, _ = QFileDialog.getOpenFileName(self, "Open PDF", "", "PDF Files (*.pdf)")
         
         if file_path:
+            # Log the file opening
+            logger.info(f"Opening PDF: {os.path.basename(file_path)}")
+            
             # Clean up any running threads before opening new document
             self.cleanup_threads()
             
@@ -905,6 +1046,9 @@ class PDFViewer(QMainWindow):
     def on_translation_complete(self, translated_text, page_num, language_name):
         """Callback when background translation completes"""
         try:
+            # Log successful translation completion
+            logger.info(f"Translation completed - Page {page_num+1} - Language: {language_name}")
+            
             # Store in cache
             cache_key = (page_num, language_name)
             self.translation_cache[cache_key] = translated_text
@@ -923,6 +1067,8 @@ class PDFViewer(QMainWindow):
             if page_num == self.current_page and language_name == self.output_language_combo.currentText():
                 self.translated_text.setText(translated_text)
         except Exception as e:
+            # Log error
+            logger.error(f"Error handling translation result: {str(e)}")
             print(f"Error in on_translation_complete: {e}")
         finally:
             # Always attempt to restore cursor when a translation completes for the current page
@@ -945,11 +1091,14 @@ class PDFViewer(QMainWindow):
         
     def request_api_key(self):
         """Show dialog to request API key from user"""
+        logger.info("API key requested from user")
+        
         dialog = ApiKeyDialog(self)
         if dialog.exec_() == QDialog.Accepted:
             api_key = dialog.key_input.text().strip()
             
             if api_key and api_key.startswith("sk-"):
+                logger.info("Valid API key provided")
                 # Store in keyring
                 keyring.set_password("pdf_translator", "openai_api_key", api_key)
                 
@@ -959,22 +1108,22 @@ class PDFViewer(QMainWindow):
                 
                 return True
             else:
+                logger.warning("Invalid API key provided")
                 QMessageBox.warning(self, "Invalid API Key", 
                                   "The API key doesn't appear to be valid. It should start with 'sk-'.")
         
         return False
     
     def translate_text(self, force_new_translation=True):
-        """Translate the extracted text using OpenAI's GPT API
-        
-        Args:
-            force_new_translation: If True, translate even if cached translation exists
-        """
+        """Translate the extracted text using OpenAI's GPT API"""
         # Check if there is any text to translate
         if not self.extracted_text or self.extracted_text.strip() == "":
             self.translated_text.setText("No text to translate.")
             return
-            
+        
+        # Log translation request
+        logger.info(f"Manual translation requested - Page {self.current_page+1} - Force new: {force_new_translation}")
+        
         language_name = self.output_language_combo.currentText()
         cache_key = (self.current_page, language_name)
         
@@ -1133,6 +1282,7 @@ class PDFViewer(QMainWindow):
 
     def closeEvent(self, event):
         """Handle application close event to clean up threads"""
+        logger.info("=== Application Closing ===")
         self.ensure_normal_cursor()
         self.cleanup_threads()
         super().closeEvent(event)
@@ -1259,6 +1409,9 @@ class PDFViewer(QMainWindow):
         # Check if we have a document
         if not self.doc:
             return
+        
+        # Log bulk translation request
+        logger.info(f"Bulk translation requested - Total pages: {len(self.doc)}")
         
         # Check for API key
         if not os.getenv('OPENAI_API_KEY'):
@@ -1541,6 +1694,9 @@ class PDFViewer(QMainWindow):
 
     def export_as_text(self):
         """Export the translated document as a text file, skipping untranslated pages"""
+        # Log export attempt
+        logger.info("Text export initiated")
+        
         # Show file save dialog for the text file
         file_path, _ = QFileDialog.getSaveFileName(
             self, 
@@ -1607,6 +1763,9 @@ class PDFViewer(QMainWindow):
             # Ask if user wants to open the exported file
             self.open_exported_file(file_path)
             
+            # Add log at the end of successful export
+            logger.info(f"Text export completed: {os.path.basename(file_path)}")
+            
         except Exception as e:
             # Show error message if export fails
             QMessageBox.critical(
@@ -1617,7 +1776,10 @@ class PDFViewer(QMainWindow):
             self.status_label.showMessage(f"Export failed: {str(e)}", 5000)
 
     def export_as_pdf(self):
-        """Export the translated document as a PDF file with page structure preserved, skipping untranslated pages"""
+        """Export the translated document as a PDF file with page structure preserved"""
+        # Log export attempt
+        logger.info("PDF export initiated")
+        
         # Show file save dialog for the PDF file
         file_path, _ = QFileDialog.getSaveFileName(
             self, 
@@ -1730,6 +1892,9 @@ Included pages: {', '.join(map(str, translated_page_numbers))}
             
             # Ask if user wants to open the exported file
             self.open_exported_file(file_path)
+            
+            # Add log at the end of successful export
+            logger.info(f"PDF export completed: {os.path.basename(file_path)}")
             
         except Exception as e:
             # Show error message if export fails
@@ -1896,6 +2061,18 @@ Included pages: {', '.join(map(str, translated_page_numbers))}
         except ValueError:
             # Reset to current page if the input is not a valid number
             self.update_page_display()
+
+    def on_debug_level_changed(self):
+        """Handle debug level selection change"""
+        selected_level = self.debug_level_combo.currentData()
+        logger.setLevel(selected_level)
+        
+        # Show a brief status message
+        level_name = self.debug_level_combo.currentText()
+        self.status_label.showMessage(f"Logging level set to: {level_name}", 3000)
+        
+        # Log the level change
+        logger.info(f"Logging level changed to: {level_name}")
 
 
 if __name__ == '__main__':
