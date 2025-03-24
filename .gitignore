@@ -4,3 +4,4 @@ build/
 *.spec
 temp/
 logs/
+sessions/

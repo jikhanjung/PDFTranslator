@@ -2202,17 +2202,35 @@ Included pages: {', '.join(map(str, translated_page_numbers))}
             self.translate_all_btn.setEnabled(True)
             self.export_btn.setEnabled(True)
             
-            # Set up progress bar
+            # Initialize progress bar with document info
             self.translation_progress.set_document_info(len(self.doc))
             self.translation_progress.set_current_page(self.current_page)
             
-            # Restore translated and translating pages
-            translated_pages = session_data.get('translated_pages', [])
-            for page in translated_pages:
-                self.translation_progress.mark_page_translated(page)
-                
-            # Check if the current page is translated and display it
+            # Get current language for the progress bar
             current_language = self.output_language_combo.currentText()
+            
+            # Clear any existing progress state
+            self.translation_progress.translated_pages.clear()
+            self.translation_progress.translating_pages.clear()
+            
+            # Mark pages as translated based on the translation cache
+            for cache_key in self.translation_cache:
+                page_num, language = cache_key
+                if language == current_language:
+                    self.translation_progress.mark_page_translated(page_num)
+            
+            # Also restore any translating pages from session if available
+            translating_pages = session_data.get('translating_pages', [])
+            if translating_pages:
+                for page_num in translating_pages:
+                    # Only mark as translating if not already translated
+                    if page_num not in self.translation_progress.translated_pages:
+                        self.translation_progress.mark_page_translating(page_num)
+            
+            # Force redraw of the progress bar
+            self.translation_progress.update()
+            
+            # Check if the current page is translated and display it
             cache_key = (self.current_page, current_language)
             
             if cache_key in self.translation_cache:
