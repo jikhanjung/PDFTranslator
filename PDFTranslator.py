@@ -4,9 +4,9 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                             QHBoxLayout, QPushButton, QFileDialog, QLabel, 
                             QScrollArea, QSizePolicy, QSplitter, QTextEdit, QComboBox,
                             QDialog, QLineEdit, QDialogButtonBox, QMessageBox,
-                            QStatusBar)
-from PyQt5.QtGui import QPixmap, QImage, QCursor, QPainter, QPen, QColor
-from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer
+                            QStatusBar, QInputDialog, QGroupBox, QCheckBox)
+from PyQt5.QtGui import QPixmap, QImage, QCursor, QPainter, QPen, QColor, QFont
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QRectF
 import os
 import openai  # Revert to standard import
 from dotenv import load_dotenv
@@ -19,6 +19,9 @@ from datetime import datetime
 import pickle
 import base64
 import os.path
+import httpx
+import re
+import requests
 
 # Load environment variables for API keys
 load_dotenv()
@@ -47,7 +50,7 @@ def setup_logging():
     
     # Configure logging
     logging.basicConfig(
-        level=logging.INFO,
+        level=logging.DEBUG,
         format='%(asctime)s - %(levelname)s - %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S',
         filename=log_filename,
@@ -57,6 +60,85 @@ def setup_logging():
     logging.info("=== Application Started ===")
     return logging.getLogger('PDFTranslator')
 
+class UpstageClient:
+    def __init__(self, api_key):
+        self.api_key = api_key
+        self.headers = {"Authorization": f"Bearer {api_key}"}
+        self.ssl_verification_disabled = False
+        self.client = self._create_client()
+
+    def _create_client(self):
+        if self.ssl_verification_disabled:
+            return httpx.Client(verify=False, follow_redirects=True)  # Add follow_redirects=True
+        return httpx.Client(follow_redirects=True)  # Add follow_redirects=True
+
+    def post(self, url, files=None, data=None):
+        try:
+            # Log request details
+            logger.debug("=== Request Details ===")
+            logger.debug("URL: %s", url)
+            logger.debug("Headers: %s", {k: '***' if k == 'Authorization' else v for k, v in self.headers.items()})
+            if files:
+                logger.debug("Files: %s", {k: f"<file: {v.name}>" for k, v in files.items()})
+            if data:
+                logger.debug("Data: %s", data)
+            
+            response = self.client.post(url, headers=self.headers, files=files, data=data)
+            response.raise_for_status()
+            
+            # Log response details
+            logger.debug("=== Response Details ===")
+            logger.debug("Status Code: %d", response.status_code)
+            logger.debug("Headers: %s", dict(response.headers))
+            response_data = response.json()
+            logger.debug("Response Data: %s", json.dumps(response_data, indent=2))
+            
+            return response_data
+        except httpx.TransportError as e:
+            logger.warning(f"Transport error occurred: {e}. Disabling SSL verification.")
+            self.ssl_verification_disabled = True
+            self.client = self._create_client()
+            return self.post(url, files=files, data=data)
+        except httpx.HTTPStatusError as e:
+            logger.error(f"HTTP error occurred: {e}")
+            if e.response:
+                logger.error("Error Response: %s", e.response.text)
+            raise
+        except Exception as e:
+            logger.error(f"An unexpected error occurred: {e}")
+            raise
+
+    def get(self, url):
+        try:
+            # Log request details
+            logger.debug("=== Request Details ===")
+            logger.debug("URL: %s", url)
+            logger.debug("Headers: %s", {k: '***' if k == 'Authorization' else v for k, v in self.headers.items()})
+            
+            response = self.client.get(url, headers=self.headers)
+            response.raise_for_status()
+            
+            # Log response details
+            logger.debug("=== Response Details ===")
+            logger.debug("Status Code: %d", response.status_code)
+            logger.debug("Headers: %s", dict(response.headers))
+            response_data = response.json()
+            logger.debug("Response Data: %s", json.dumps(response_data, indent=2))
+            
+            return response_data
+        except httpx.TransportError as e:
+            logger.warning(f"Transport error occurred: {e}. Disabling SSL verification.")
+            self.ssl_verification_disabled = True
+            self.client = self._create_client()
+            return self.get(url)
+        except httpx.HTTPStatusError as e:
+            logger.error(f"HTTP error occurred: {e}")
+            if e.response:
+                logger.error("Error Response: %s", e.response.text)
+            raise
+        except Exception as e:
+            logger.error(f"An unexpected error occurred: {e}")
+            raise
 # Create a worker thread for background translation
 class TranslationWorker(QThread):
     # Signal to emit when translation is complete
@@ -391,6 +473,7 @@ class PDFViewer(QMainWindow):
         global logger
         logger = setup_logging()
         
+        self.current_file = None
         self.current_page = 0
         self.doc = None
         self.extracted_text = ""
@@ -407,7 +490,7 @@ class PDFViewer(QMainWindow):
         self.setWindowTitle('PDF Translator')
         self.setGeometry(100, 100, 1200, 800)  # Wider window for two panes
         
-        # Create central widget and layout
+        # Create central widget and main layout
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
@@ -484,7 +567,12 @@ class PDFViewer(QMainWindow):
         
         # Connect debug level change signal
         self.debug_level_combo.currentIndexChanged.connect(self.on_debug_level_changed)
-        
+
+        # Add analyze button
+        self.analyze_btn = QPushButton('Analyze')
+        self.analyze_btn.clicked.connect(lambda: self.analyze_page(True))  # Force new analysis when button clicked
+        self.analyze_btn.setEnabled(False)
+
         # Add translate button
         self.translate_btn = QPushButton('Translate')
         self.translate_btn.clicked.connect(lambda: self.translate_text(True))  # Force new translation when button clicked
@@ -516,6 +604,26 @@ class PDFViewer(QMainWindow):
         session_layout.addWidget(self.save_session_btn)
         session_layout.addWidget(self.load_session_btn)
         
+        # Create translation options group
+        #translation_options_group = QGroupBox("Translation Options")
+        translation_options_layout = QHBoxLayout()
+        
+        # Create checkboxes
+        self.auto_translate_checkbox = QCheckBox("Auto-translate")
+        self.auto_translate_checkbox.setToolTip("Automatically translate when changing pages")
+        self.auto_translate_checkbox.setChecked(False)
+        
+        self.look_ahead_checkbox = QCheckBox("Look-ahead translation")
+        self.look_ahead_checkbox.setToolTip("Pre-translate next page in background")
+        self.look_ahead_checkbox.setChecked(False)
+        
+        # Add checkboxes to the translation options layout
+        translation_options_layout.addWidget(self.auto_translate_checkbox)
+        translation_options_layout.addWidget(self.look_ahead_checkbox)
+        
+        # Add the translation options group to the main layout
+        #main_layout.addWidget(translation_options_group)
+        
         btn_layout.addWidget(self.open_btn)
         btn_layout.addWidget(self.prev_btn)
         btn_layout.addWidget(self.next_btn)
@@ -528,10 +636,12 @@ class PDFViewer(QMainWindow):
         btn_layout.addWidget(self.model_combo)
         btn_layout.addWidget(QLabel("Debug:"))
         btn_layout.addWidget(self.debug_level_combo)
+        btn_layout.addWidget(self.analyze_btn)
         btn_layout.addWidget(self.translate_btn)
         btn_layout.addWidget(self.translate_all_btn)
         btn_layout.addWidget(self.export_btn)
         btn_layout.addLayout(session_layout)  # Add session buttons below main buttons
+        btn_layout.addLayout(translation_options_layout)  # Add options layout below main buttons
         
         # Create a widget for the status and progress bar at the bottom
         status_layout = QHBoxLayout()
@@ -559,10 +669,8 @@ class PDFViewer(QMainWindow):
         self.scroll_area.setWidgetResizable(True)
         
         # Create label to display PDF
-        self.pdf_label = QLabel()
-        self.pdf_label.setAlignment(Qt.AlignCenter)
-        self.pdf_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
-        self.scroll_area.setWidget(self.pdf_label)
+        self.pdf_display = PDFDisplayWidget(self)
+        self.scroll_area.setWidget(self.pdf_display)
         
         left_layout.addWidget(self.scroll_area)
         
@@ -619,13 +727,14 @@ class PDFViewer(QMainWindow):
         self.auto_save_timer = QTimer()
         self.auto_save_timer.timeout.connect(self.auto_save_session)
         self.auto_save_timer.start(300000)  # Auto-save every 5 minutes (300,000 ms)
-    
+        
     def open_pdf(self):
         file_path, _ = QFileDialog.getOpenFileName(self, "Open PDF", "", "PDF Files (*.pdf)")
         
         if file_path:
             # Store the current PDF path
             self.current_pdf_path = file_path
+            self.current_file = os.path.abspath(file_path)
             
             # Log the file opening
             logger.info(f"Opening PDF: {os.path.basename(file_path)}")
@@ -658,6 +767,7 @@ class PDFViewer(QMainWindow):
             self.update_buttons()
             self.extract_text()
             self.translate_btn.setEnabled(True)
+            self.analyze_btn.setEnabled(True)
             self.translate_all_btn.setEnabled(True)  # Enable the Translate All button
             self.export_btn.setEnabled(True)  # Enable the Export button
             self.save_session_btn.setEnabled(True)  # Enable the Save Session button
@@ -665,7 +775,7 @@ class PDFViewer(QMainWindow):
             # Check for existing session and ask if user wants to load it
             pdf_filename = os.path.basename(file_path)
             base_filename = os.path.splitext(pdf_filename)[0]
-            session_file = f"sessions/{base_filename}_session.dat"
+            session_file = f"sessions/{base_filename}_session.json"
             
             if os.path.exists(session_file):
                 reply = QMessageBox.question(
@@ -688,43 +798,30 @@ class PDFViewer(QMainWindow):
             # ...
     
     def update_page_display(self):
-        if not self.doc:
-            return
+        """Update the page display with the current page"""
+        try:
+            if self.doc is None:
+                return
             
-        # Get the current page
-        page = self.doc.load_page(self.current_page)
-        
-        # Get the view area size
-        view_width = self.scroll_area.width() - 20  # Subtract some padding
-        view_height = self.scroll_area.height() - 20
-        
-        # Calculate scaling factors to fit width and height
-        page_rect = page.rect
-        width_scale = view_width / page_rect.width
-        height_scale = view_height / page_rect.height
-        
-        # Use the smaller scale to ensure the whole page fits
-        scale = min(width_scale, height_scale)
-        
-        # Use scaled matrix for rendering
-        matrix = fitz.Matrix(scale, scale)
-        
-        # Render page to an image
-        pix = page.get_pixmap(matrix=matrix)
-        
-        # Convert to QImage
-        img = QImage(pix.samples, pix.width, pix.height, pix.stride, QImage.Format_RGB888)
-        
-        # Convert to QPixmap and display
-        pixmap = QPixmap.fromImage(img)
-        self.pdf_label.setPixmap(pixmap)
-        
-        # Update page display with 1-based page numbers
-        self.page_input.setText(str(self.current_page + 1))
-        self.page_total.setText(f"/ {len(self.doc)}")
-        
-        # Request repaint to ensure proper display
-        self.scroll_area.viewport().update()
+            page = self.doc[self.current_page]
+            pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
+            img = QImage(pix.samples, pix.width, pix.height, pix.stride, QImage.Format.Format_RGB888)
+            pixmap = QPixmap.fromImage(img)
+            
+            # Update the display with new page
+            self.pdf_display.set_page(self.current_page, pixmap)
+            
+            # Update page number display
+            self.page_input.setText(str(self.current_page + 1))
+            
+            # Log current state for debugging
+            logger.debug(f"Updated display to page {self.current_page}")
+            logger.debug(f"Available page structures: {list(self.pdf_display.page_structures.keys())}")
+            
+        except Exception as e:
+            logger.error(f"Error updating page display: {str(e)}")
+            logger.error("Full error details:", exc_info=True)
+            self.status_label.showMessage(f"Error displaying page: {str(e)}", 5000)
     
     def update_buttons(self):
         if not self.doc:
@@ -739,120 +836,43 @@ class PDFViewer(QMainWindow):
         self.next_btn.setEnabled(self.current_page < len(self.doc) - 1)
     
     def next_page(self):
+        """Go to next page"""
         if self.doc and self.current_page < len(self.doc) - 1:
-            # Get the next page number
-            next_page_num = self.current_page + 1
-            language_name = self.output_language_combo.currentText()
-            cache_key = (next_page_num, language_name)
-            
-            # Only clean up unneeded threads, preserving any that are translating our target page
-            self.cleanup_threads()
-            
-            # Move to next page immediately
-            self.current_page = next_page_num
+            self.current_page += 1
             self.update_page_display()
             self.update_buttons()
-            self.extract_text()
             
-            # Clear translated text area before checking cache
-            self.translated_text.clear()
-            QApplication.processEvents()  # Update UI immediately
+            # Log state after page change
+            logger.debug(f"Moved to next page: {self.current_page}")
+            logger.debug(f"Available structures: {list(self.pdf_display.page_structures.keys())}")
             
-            # Check if there's any text to translate
-            if not self.extracted_text or self.extracted_text.strip() == "":
-                self.translated_text.setText("No text to translate on this page.")
-                # Ensure normal cursor
-                self.ensure_normal_cursor()
-                return
-            
-            # Check if translation exists in cache
-            if cache_key in self.translation_cache:
-                # If we have a cached translation, display it and ensure normal cursor
-                self.translated_text.setText(self.translation_cache[cache_key])
-                # Make sure to restore cursor if it was waiting
-                if QApplication.overrideCursor() is not None:
-                    QApplication.restoreOverrideCursor()
-            else:
-                # Only show "Waiting for translation" if we have an API key
-                if os.getenv('OPENAI_API_KEY'):
-                    # First restore any existing override cursor to avoid stacking
-                    while QApplication.overrideCursor() is not None:
-                        QApplication.restoreOverrideCursor()
-                        
-                    # Then set wait cursor since we're actively waiting for translation
-                    self.translated_text.setText("Waiting for translation...")
-                    QApplication.setOverrideCursor(QCursor(Qt.WaitCursor))
-                else:
-                    # No API key - inform the user
-                    self.translated_text.setText("Translation requires an API key. Click 'Translate' to provide one.")
-                    # Make sure cursor is normal
-                    if QApplication.overrideCursor() is not None:
-                        QApplication.restoreOverrideCursor()
-            
-            # Start look-ahead translation for next page if available
-            # (This won't restart an already ongoing translation)
-            self.start_look_ahead_translation()
-            
-            # Update current page in progress bar
-            self.translation_progress.set_current_page(self.current_page)
+            # Only translate if auto-translate is enabled
+            if self.auto_translate_checkbox.isChecked():
+                self.translate_text()
+                
+            # Only do look-ahead if both auto-translate and look-ahead are enabled
+            if self.look_ahead_checkbox.isChecked():
+                self.start_look_ahead_translation()
     
     def prev_page(self):
+        """Go to previous page"""
         if self.doc and self.current_page > 0:
-            # Get the previous page number
-            prev_page_num = self.current_page - 1
-            language_name = self.output_language_combo.currentText()
-            cache_key = (prev_page_num, language_name)
-            
-            # Only clean up unneeded threads
-            self.cleanup_threads()
-            
-            # Move to previous page immediately
-            self.current_page = prev_page_num
+            self.current_page -= 1
             self.update_page_display()
             self.update_buttons()
-            self.extract_text()
-            
-            # Clear translated text area before checking cache
-            self.translated_text.clear()
-            QApplication.processEvents()  # Update UI immediately
-            
-            # Check if there's any text to translate
-            if not self.extracted_text or self.extracted_text.strip() == "":
-                self.translated_text.setText("No text to translate on this page.")
-                # Ensure normal cursor
-                self.ensure_normal_cursor()
-                return
-            
-            # Check if translation exists in cache
-            if cache_key in self.translation_cache:
-                # If we have a cached translation, display it and ensure normal cursor
-                self.translated_text.setText(self.translation_cache[cache_key])
-                # Make sure to restore cursor if it was waiting
-                if QApplication.overrideCursor() is not None:
-                    QApplication.restoreOverrideCursor()
-            else:
-                # Only show "Waiting for translation" if we have an API key
-                if os.getenv('OPENAI_API_KEY'):
-                    # First restore any existing override cursor to avoid stacking
-                    while QApplication.overrideCursor() is not None:
-                        QApplication.restoreOverrideCursor()
-                        
-                    # Then set wait cursor since we're actively waiting for translation
-                    self.translated_text.setText("Waiting for translation...")
-                    QApplication.setOverrideCursor(QCursor(Qt.WaitCursor))
-                else:
-                    # No API key - inform the user
-                    self.translated_text.setText("Translation requires an API key. Click 'Translate' to provide one.")
-                    # Make sure cursor is normal
-                    if QApplication.overrideCursor() is not None:
-                        QApplication.restoreOverrideCursor()
-            
-            # Start look-ahead translation for next page if available
-            self.start_look_ahead_translation()
-            
-            # Update current page in progress bar
-            self.translation_progress.set_current_page(self.current_page)
-    
+
+            # Log state after page change
+            logger.debug(f"Moved to previous page: {self.current_page}")
+            logger.debug(f"Available structures: {list(self.pdf_display.page_structures.keys())}")
+
+            # Only translate if auto-translate is enabled
+            if self.auto_translate_checkbox.isChecked():
+                self.translate_text()
+                
+            # Only do look-ahead if both auto-translate and look-ahead are enabled
+            if self.look_ahead_checkbox.isChecked():
+                self.start_look_ahead_translation()
+
     def extract_text(self):
         """Extract text from the current PDF page"""
         if not self.doc:
@@ -1097,6 +1117,190 @@ class PDFViewer(QMainWindow):
         
         return False
     
+    def analyze_page(self, force_new_analysis=True):
+        """Analyze current page using Upstage API"""
+        try:
+            # Check if analysis already exists and force_new_analysis is False
+            if not force_new_analysis and self.current_page in self.pdf_display.page_structures:
+                logger.info(f"Using cached analysis for page {self.current_page + 1}")
+                result = self.pdf_display.page_structures[self.current_page]['structure']
+                self.show_page_structure(result)
+                return result
+
+            if not hasattr(self, 'upstage_client'):
+                self.initialize_upstage_client()
+                
+            # Create temporary file for the current page
+            temp_path = f"temp_page_{self.current_page}.png"
+            page = self.doc[self.current_page]
+            pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
+            pix.save(temp_path)
+            
+            try:
+                url = "https://api.upstage.ai/v1/document-ai/document-parse"
+                with open(temp_path, "rb") as img_file:
+                    files = {"document": img_file}
+                    result = self.upstage_client.post(url, files=files)
+                    
+                    # Store the analysis result and update display
+                    self.pdf_display.set_page_structure(self.current_page, result)
+                    
+                    # Show the analysis text
+                    self.show_page_structure(result)
+                    
+                    # Auto-save session after analysis
+                    self.save_session()
+                    
+                    # Log the state after analysis
+                    logger.debug(f"Analysis complete for page {self.current_page}")
+                    logger.debug(f"Page structures after analysis: {list(self.pdf_display.page_structures.keys())}")
+                    
+                    # Show success message
+                    self.status_label.showMessage(f"Page {self.current_page + 1} analysis complete", 3000)
+                    
+                    return result
+                    
+            finally:
+                # Clean up temporary file
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+                    
+        except Exception as e:
+            error_msg = f"Error during page analysis: {str(e)}"
+            logger.error(error_msg)
+            logger.error("Full error details:", exc_info=True)
+            self.status_label.showMessage(error_msg, 5000)
+            return None
+
+    def draw_bounding_boxes(self, pixmap, analysis_result):
+        """Draw bounding boxes and labels on the page image"""
+        try:
+            if not analysis_result or 'elements' not in analysis_result:
+                return pixmap
+
+            # Create a QPainter to draw on the pixmap
+            painter = QPainter(pixmap)
+            try:
+                # Set up the painter
+                painter.setRenderHint(QPainter.Antialiasing)
+                
+                # Get the pixmap dimensions for coordinate conversion
+                width = pixmap.width()
+                height = pixmap.height()
+                
+                # Set up colors for different element types
+                colors = {
+                    'header': QColor(255, 0, 0, 127),    # Red (semi-transparent)
+                    'heading1': QColor(0, 255, 0, 127),  # Green (semi-transparent)
+                    'paragraph': QColor(0, 0, 255, 127), # Blue (semi-transparent)
+                    'footnote': QColor(255, 165, 0, 127),# Orange (semi-transparent)
+                    'footer': QColor(128, 0, 128, 127)   # Purple (semi-transparent)
+                }
+                
+                # Set up the font for labels
+                font = QFont()
+                font.setPointSize(8)
+                painter.setFont(font)
+                
+                # Draw boxes for each element
+                for element in analysis_result['elements']:
+                    category = element.get('category', 'unknown')
+                    coords = element.get('coordinates', [])
+                    
+                    if len(coords) >= 4:
+                        # Convert normalized coordinates to pixel coordinates
+                        x1 = int(coords[0]['x'] * width)
+                        y1 = int(coords[0]['y'] * height)
+                        x2 = int(coords[2]['x'] * width)
+                        y2 = int(coords[2]['y'] * height)
+                        
+                        # Get color for this element type
+                        color = colors.get(category, QColor(128, 128, 128, 127))  # Gray for unknown types
+                        
+                        # Draw the rectangle
+                        painter.setPen(QPen(color, 2))
+                        painter.setBrush(Qt.NoBrush)
+                        painter.drawRect(x1, y1, x2 - x1, y2 - y1)
+                        
+                        # Draw the label
+                        label_rect = QRectF(x1, y1 - 15, 100, 15)  # Label above the box
+                        painter.fillRect(label_rect, QColor(255, 255, 255, 200))  # White background
+                        painter.setPen(QPen(color.darker()))
+                        painter.drawText(label_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, category)
+                        
+            finally:
+                painter.end()
+                
+            return pixmap
+                
+        except Exception as e:
+            logger.error(f"Error drawing bounding boxes: {str(e)}")
+            logger.error("Full error details:", exc_info=True)
+            return pixmap
+
+    def show_page_structure(self, result):
+        """Display the page structure analysis results in a formatted way"""
+        try:
+            logger.debug("Starting show_page_structure with result")
+            
+            display_text = "=== PAGE STRUCTURE ANALYSIS ===\n\n"
+            
+            if not result:
+                logger.debug("Result is None or empty")
+                display_text += "No analysis results available (empty result)."
+                self.original_text.setText(display_text)
+                return
+                
+            # Add API version and model info
+            display_text += f"API Version: {result.get('api', 'N/A')}\n"
+            display_text += f"Model: {result.get('model', 'N/A')}\n"
+            display_text += f"OCR Enabled: {result.get('ocr', False)}\n\n"
+            
+            # Process elements
+            if 'elements' in result:
+                display_text += "Document Structure:\n"
+                display_text += "-" * 40 + "\n\n"
+                
+                for element in result['elements']:
+                    # Add element category
+                    category = element.get('category', 'unknown')
+                    display_text += f"Type: {category.upper()}\n"
+                    
+                    # Add content
+                    if 'content' in element and 'html' in element['content']:
+                        # Extract text from HTML content
+                        html_content = element['content']['html']
+                        # Remove HTML tags for display
+                        text_content = html_content.replace('<br>', '\n')
+                        for tag in ['<header.*?>', '<h1.*?>', '<p.*?>', '<footer.*?>', '</header>', '</h1>', '</p>', '</footer>']:
+                            text_content = re.sub(tag, '', text_content)
+                        display_text += f"Content: {text_content.strip()}\n"
+                    
+                    # Add position information
+                    if 'coordinates' in element:
+                        coords = element['coordinates']
+                        if len(coords) >= 4:  # Ensure we have all corners
+                            display_text += f"Position: Top-Left ({coords[0]['x']:.3f}, {coords[0]['y']:.3f}), "
+                            display_text += f"Bottom-Right ({coords[2]['x']:.3f}, {coords[2]['y']:.3f})\n"
+                    
+                    display_text += "-" * 40 + "\n"
+            
+            # Add usage information
+            if 'usage' in result:
+                display_text += f"\nPages processed: {result['usage'].get('pages', 1)}\n"
+            
+            logger.debug("Final display text:")
+            logger.debug(display_text)
+            
+            # Update the text display
+            self.original_text.setText(display_text)
+            
+        except Exception as e:
+            error_msg = f"Error displaying page structure: {str(e)}"
+            logger.error(error_msg)
+            logger.error("Full error details:", exc_info=True)
+            self.original_text.setText(f"Error displaying analysis results:\n{str(e)}")
+
     def translate_text(self, force_new_translation=True):
         """Translate the extracted text using OpenAI's GPT API"""
         # Check if there is any text to translate
@@ -1808,14 +2012,14 @@ class PDFViewer(QMainWindow):
             # Create cover page content
             cover_text = f"""Translated Document
 
-Language: {current_language}
-Total Document Pages: {len(self.doc)}
-Translated Pages: {translated_pages}
-Date: {time.strftime('%Y-%m-%d %H:%M:%S')}
-Translated using: {self.model_combo.currentText()}
+            Language: {current_language}
+            Total Document Pages: {len(self.doc)}
+            Translated Pages: {translated_pages}
+            Date: {time.strftime('%Y-%m-%d %H:%M:%S')}
+            Translated using: {self.model_combo.currentText()}
 
-Included pages: {', '.join(map(str, translated_page_numbers))}
-"""
+            Included pages: {', '.join(map(str, translated_page_numbers))}
+            """
             
             # Insert cover text with proper spacing
             text_lines = cover_text.split('\n')
@@ -1920,135 +2124,41 @@ Included pages: {', '.join(map(str, translated_page_numbers))}
                 subprocess.call(('xdg-open', file_path))
 
     def go_to_page(self):
-        """Navigate to the specific page entered by the user and translate it"""
-        if not self.doc:
-            return
-        
+        """Handle page navigation when user enters a page number"""
         try:
-            # Get the page number from the input (subtract 1 for zero-based index)
-            entered_page = int(self.page_input.text())
-            
-            # Validate the page number
-            if entered_page < 1:
-                entered_page = 1
-            elif entered_page > len(self.doc):
-                entered_page = len(self.doc)
-            
-            # Convert to zero-based index
-            page_num = entered_page - 1
-            
-            # Don't do anything if we're already on this page
-            if page_num == self.current_page:
+            if not self.doc:
                 return
+                
+            # Get the entered page number (1-based)
+            try:
+                new_page = int(self.page_input.text()) - 1
+            except ValueError:
+                return
+                
+            # Validate page number
+            if new_page < 0 or new_page >= len(self.doc):
+                self.status_label.showMessage(f"Invalid page number. Please enter a number between 1 and {len(self.doc)}", 5000)
+                self.page_input.setText(str(self.current_page + 1))
+                return
+                
+            # Update current page
+            self.current_page = new_page
             
-            # Get the language name for cache lookup
-            language_name = self.output_language_combo.currentText()
-            cache_key = (page_num, language_name)
-            
-            # Clean up unneeded threads
-            self.cleanup_threads()
-            
-            # Move to the specified page
-            self.current_page = page_num
+            # Update the display
             self.update_page_display()
             self.update_buttons()
-            self.extract_text()
             
-            # Clear translated text area before checking cache
-            self.translated_text.clear()
-            QApplication.processEvents()  # Update UI immediately
-            
-            # Check if there's any text to translate
-            if not self.extracted_text or self.extracted_text.strip() == "":
-                self.translated_text.setText("No text to translate on this page.")
-                self.ensure_normal_cursor()
-                return
-            
-            # Set wait cursor while we check for translations or initiate new ones
-            QApplication.setOverrideCursor(QCursor(Qt.WaitCursor))
-            
-            # Check if API key is available for translation
-            if not os.getenv('OPENAI_API_KEY'):
-                self.ensure_normal_cursor()
-                if self.request_api_key():
-                    # If user provided an API key, proceed with translation
-                    QApplication.setOverrideCursor(QCursor(Qt.WaitCursor))
-                else:
-                    # User canceled API key dialog
-                    self.translated_text.setText("Translation requires an API key. Click 'Translate' to provide one.")
-                    return
-            
-            # Check if translation exists in cache
-            if cache_key in self.translation_cache:
-                # If we have a cached translation, display it
-                self.translated_text.setText(self.translation_cache[cache_key])
-            else:
-                # No cached translation, so translate the page
-                self.translated_text.setText("Translating...")
-                QApplication.processEvents()  # Update UI immediately
+            # Only translate if auto-translate is enabled
+            if self.auto_translate_checkbox.isChecked():
+                self.translate_text()
                 
-                # Get input and output languages
-                input_lang_code = self.input_language_combo.currentData()
-                input_lang_name = self.input_language_combo.currentText()
+            # Only do look-ahead if both auto-translate and look-ahead are enabled
+            if self.look_ahead_checkbox.isChecked():
+                self.start_look_ahead_translation()
                 
-                # If auto-detect, we need to detect the language
-                if input_lang_code == "auto":
-                    self.status_label.showMessage("Detecting language...")
-                    QApplication.processEvents()
-                    self.detected_language = self.detect_language(self.extracted_text)
-                    input_lang_code = self.detected_language
-                    
-                    # Update input language combo box
-                    for i in range(self.input_language_combo.count()):
-                        if self.input_language_combo.itemData(i) == input_lang_code:
-                            input_lang_name = self.input_language_combo.itemText(i)
-                            self.input_language_combo.setCurrentIndex(i)
-                            break
-                    
-                    self.status_label.showMessage(f"Detected language: {input_lang_name}", 3000)
-                
-                output_lang_code = self.output_language_combo.currentData()
-                
-                # Create worker thread for translation
-                worker = TranslationWorker(
-                    self.extracted_text,
-                    self.current_page,
-                    input_lang_code,
-                    output_lang_code,
-                    language_name,
-                    self.model_combo.currentData()
-                )
-                
-                # Connect signals
-                worker.translationComplete.connect(self.on_translation_complete)
-                
-                # Mark the page as translating
-                self.translation_progress.mark_page_translating(self.current_page)
-                
-                # Add to active workers
-                self.active_workers.append(worker)
-                
-                # Connect finished signal to remove from active workers
-                worker.finished.connect(
-                    lambda: self.active_workers.remove(worker) if worker in self.active_workers else None
-                )
-                
-                # Start the worker
-                worker.start()
-            
-            # Start look-ahead translation for next page
-            self.start_look_ahead_translation()
-            
-            # Update current page in progress bar
-            self.translation_progress.set_current_page(self.current_page)
-            
-            # Restore cursor if we displayed cached translation
-            if cache_key in self.translation_cache:
-                self.ensure_normal_cursor()
-        
-        except ValueError:
-            # Reset to current page if the input is not a valid number
-            self.update_page_display()
+        except Exception as e:
+            logger.error(f"Error navigating to page: {str(e)}")
+            self.status_label.showMessage(f"Error navigating to page: {str(e)}", 5000)
 
     def on_debug_level_changed(self):
         """Handle debug level selection change"""
@@ -2063,197 +2173,473 @@ Included pages: {', '.join(map(str, translated_page_numbers))}
         logger.info(f"Logging level changed to: {level_name}")
 
     def save_session(self):
-        """Save the current session state to a file"""
-        if not self.doc:
-            # No document open, nothing to save
-            self.status_label.showMessage("No document open to save session", 3000)
-            return False
-            
+        """Save current session data to a file"""
         try:
-            # Get the current PDF file path
-            if not hasattr(self, 'current_pdf_path') or not self.current_pdf_path:
-                self.status_label.showMessage("Unable to save session: No file path available", 3000)
-                return False
+            if not hasattr(self, 'current_file') or not self.current_file:
+                logger.debug("No current file to save session for")
+                return
                 
-            # Create a session data dictionary
-            session_data = {
-                'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                'pdf_path': self.current_pdf_path,
-                'current_page': self.current_page,
-                'total_pages': len(self.doc) if self.doc else 0,
-                'translation_cache': self.translation_cache,
-                'input_language': self.input_language_combo.currentData(),
-                'output_language': self.output_language_combo.currentData(),
-                'model': self.model_combo.currentData(),
-                'translated_pages': list(self.translation_progress.translated_pages),
-                'translating_pages': list(self.translation_progress.translating_pages),
-                'detected_language': self.detected_language if hasattr(self, 'detected_language') else None
-            }
-            
-            # Create session directory if it doesn't exist
+            # Create sessions directory if it doesn't exist
             if not os.path.exists('sessions'):
                 os.makedirs('sessions')
                 
-            # Create a filename based on the PDF file name
-            pdf_filename = os.path.basename(self.current_pdf_path)
-            base_filename = os.path.splitext(pdf_filename)[0]
-            session_file = f"sessions/{base_filename}_session.dat"
+            # Get base filename without extension
+            base_name = os.path.splitext(os.path.basename(self.current_file))[0]
+            session_file = os.path.join('sessions', f'{base_name}_session.json')
             
-            # Save the session data to a file using pickle
-            with open(session_file, 'wb') as f:
-                pickle.dump(session_data, f)
-                
-            # Log the session save
+            # Prepare page structures data
+            page_structures = {}
+            if hasattr(self, 'pdf_display'):
+                for page_num, page_data in self.pdf_display.page_structures.items():
+                    if isinstance(page_data, dict) and 'structure' in page_data:
+                        structure_data = page_data
+                    else:
+                        structure_data = {
+                            'timestamp': datetime.now().isoformat(),
+                            'structure': page_data
+                        }
+                    page_structures[str(page_num)] = structure_data
+            
+            # Prepare main session data
+            session_data = {
+                'filename': self.current_file,
+                'current_page': self.current_page,
+                'translations': getattr(self, 'translations', {}),
+                'page_structures': page_structures,
+                'auto_translate': self.auto_translate_checkbox.isChecked(),
+                'look_ahead': self.look_ahead_checkbox.isChecked(),
+                'timestamp': datetime.now().isoformat(),
+                'total_pages': len(self.doc) if self.doc else 0,
+                'document_info': {
+                    'title': self.doc.metadata.get('title', '') if self.doc else '',
+                    'author': self.doc.metadata.get('author', '') if self.doc else '',
+                    'subject': self.doc.metadata.get('subject', '') if self.doc else '',
+                    'keywords': self.doc.metadata.get('keywords', '') if self.doc else ''
+                },
+                'session_info': {
+                    'analyzed_pages': len(page_structures),
+                    'translated_pages': len(getattr(self, 'translations', {})),
+                    'app_version': '1.0.0'
+                }
+            }
+            
+            # Save session data as JSON
+            with open(session_file, 'w', encoding='utf-8') as f:
+                json.dump(session_data, f, ensure_ascii=False, indent=2)
+            
             logger.info(f"Session saved to {session_file}")
-            self.status_label.showMessage(f"Session saved successfully", 3000)
-            return True
+            logger.debug(f"Saved {len(page_structures)} page structures")
             
         except Exception as e:
-            error_msg = f"Failed to save session: {str(e)}"
-            logger.error(error_msg)
-            self.status_label.showMessage(error_msg, 3000)
-            return False
+            logger.error(f"Error saving session: {str(e)}")
+            logger.error("Full error details:", exc_info=True)
 
     def load_session(self, session_file=None):
-        """Load a saved session from a file"""
+        """Load session data from a file"""
         try:
-            # If no session file is specified, and we have an open document, try to find its session
-            if not session_file and hasattr(self, 'current_pdf_path') and self.current_pdf_path:
-                pdf_filename = os.path.basename(self.current_pdf_path)
-                base_filename = os.path.splitext(pdf_filename)[0]
-                auto_session_file = f"sessions/{base_filename}_session.dat"
+            if not session_file and not self.current_file:
+                return
                 
-                if os.path.exists(auto_session_file):
-                    session_file = auto_session_file
-            
-            # If still no session file, let the user choose one
             if not session_file:
-                session_file, _ = QFileDialog.getOpenFileName(
-                    self, 
-                    "Load Session", 
-                    "sessions", 
-                    "Session Files (*.dat)"
-                )
+                base_name = os.path.splitext(os.path.basename(self.current_file))[0]
+                session_file = os.path.join('sessions', f'{base_name}_session.json')
+                old_session_file = os.path.join('sessions', f'{base_name}_session.dat')
                 
-            if not session_file or not os.path.exists(session_file):
-                return False
+            # Try to load JSON format first
+            try:
+                if os.path.exists(session_file):
+                    with open(session_file, 'r', encoding='utf-8') as f:
+                        session_data = json.load(f)
+                    logger.info("Loaded session from JSON format")
+                # If JSON doesn't exist but pickle does, try to migrate
+                elif os.path.exists(old_session_file):
+                    logger.info("Found old pickle format, attempting to migrate...")
+                    with open(old_session_file, 'rb') as f:
+                        old_data = pickle.load(f)
+                    
+                    # Convert pickle data to new JSON format
+                    page_structures = {}
+                    if hasattr(self, 'pdf_display') and hasattr(self.pdf_display, 'page_structures'):
+                        for page_num, structure in old_data.get('page_structures', {}).items():
+                            page_structures[str(page_num)] = {
+                                'timestamp': datetime.now().isoformat(),
+                                'structure': structure
+                            }
+                    
+                    # Create new format session data
+                    session_data = {
+                        'filename': old_data.get('filename', ''),
+                        'current_page': old_data.get('current_page', 0),
+                        'translations': old_data.get('translations', {}),
+                        'page_structures': page_structures,
+                        'auto_translate': old_data.get('auto_translate', False),
+                        'look_ahead': old_data.get('look_ahead', False),
+                        'timestamp': datetime.now().isoformat(),
+                        'total_pages': len(self.doc) if self.doc else 0,
+                        'document_info': {
+                            'title': self.doc.metadata.get('title', '') if self.doc else '',
+                            'author': self.doc.metadata.get('author', '') if self.doc else '',
+                            'subject': self.doc.metadata.get('subject', '') if self.doc else '',
+                            'keywords': self.doc.metadata.get('keywords', '') if self.doc else ''
+                        },
+                        'session_info': {
+                            'analyzed_pages': len(page_structures),
+                            'translated_pages': len(old_data.get('translations', {})),
+                            'app_version': '1.0.0'
+                        }
+                    }
+                    
+                    # Save converted data in JSON format
+                    with open(session_file, 'w', encoding='utf-8') as f:
+                        json.dump(session_data, f, ensure_ascii=False, indent=2)
+                    
+                    # Backup old pickle file
+                    backup_file = old_session_file + '.backup'
+                    os.rename(old_session_file, backup_file)
+                    logger.info(f"Migrated session data to JSON format and backed up old file to {backup_file}")
+                else:
+                    logger.info(f"No session file found")
+                    return
+                    
+            except (UnicodeDecodeError, json.JSONDecodeError) as e:
+                logger.error(f"Error reading session file: {str(e)}")
+                logger.error("Full error details:", exc_info=True)
+                return
                 
-            # Load the session data
-            with open(session_file, 'rb') as f:
-                session_data = pickle.load(f)
+            # Load the data into application
+            try:
+                # Load translations
+                self.translations = session_data.get('translations', {})
                 
-            # Check if the referenced PDF still exists
-            pdf_path = session_data['pdf_path']
-            if not os.path.exists(pdf_path):
-                QMessageBox.warning(
-                    self,
-                    "PDF Not Found",
-                    f"The PDF file associated with this session could not be found:\n{pdf_path}"
-                )
-                return False
+                # Load translation options
+                self.auto_translate_checkbox.setChecked(session_data.get('auto_translate', False))
+                self.look_ahead_checkbox.setChecked(session_data.get('look_ahead', False))
                 
-            # Close current document if one is open
-            if self.doc:
-                self.doc.close()
+                # Load page structures
+                self.pdf_display.page_structures.clear()
+                page_structures = session_data.get('page_structures', {})
                 
-            # Clean up existing threads
-            self.cleanup_threads()
-            
-            # Load the referenced PDF
-            self.current_pdf_path = pdf_path
-            self.doc = fitz.open(pdf_path)
-            
-            # Restore session state
-            self.current_page = session_data.get('current_page', 0)
-            self.translation_cache = session_data.get('translation_cache', {})
-            
-            # Set language selections
-            input_lang = session_data.get('input_language')
-            output_lang = session_data.get('output_language')
-            model = session_data.get('model')
-            
-            if input_lang:
-                for i in range(self.input_language_combo.count()):
-                    if self.input_language_combo.itemData(i) == input_lang:
-                        self.input_language_combo.setCurrentIndex(i)
-                        break
-                        
-            if output_lang:
-                for i in range(self.output_language_combo.count()):
-                    if self.output_language_combo.itemData(i) == output_lang:
-                        self.output_language_combo.setCurrentIndex(i)
-                        break
-                        
-            if model:
-                for i in range(self.model_combo.count()):
-                    if self.model_combo.itemData(i) == model:
-                        self.model_combo.setCurrentIndex(i)
-                        break
-            
-            # Restore detected language if available
-            if 'detected_language' in session_data:
-                self.detected_language = session_data['detected_language']
-            
-            # Update UI
-            self.update_page_display()
-            self.update_buttons()
-            self.extract_text()
-            self.translate_btn.setEnabled(True)
-            self.translate_all_btn.setEnabled(True)
-            self.export_btn.setEnabled(True)
-            
-            # Initialize progress bar with document info
-            self.translation_progress.set_document_info(len(self.doc))
-            self.translation_progress.set_current_page(self.current_page)
-            
-            # Get current language for the progress bar
-            current_language = self.output_language_combo.currentText()
-            
-            # Clear any existing progress state
-            self.translation_progress.translated_pages.clear()
-            self.translation_progress.translating_pages.clear()
-            
-            # Mark pages as translated based on the translation cache
-            for cache_key in self.translation_cache:
-                page_num, language = cache_key
-                if language == current_language:
-                    self.translation_progress.mark_page_translated(page_num)
-            
-            # Also restore any translating pages from session if available
-            translating_pages = session_data.get('translating_pages', [])
-            if translating_pages:
-                for page_num in translating_pages:
-                    # Only mark as translating if not already translated
-                    if page_num not in self.translation_progress.translated_pages:
-                        self.translation_progress.mark_page_translating(page_num)
-            
-            # Force redraw of the progress bar
-            self.translation_progress.update()
-            
-            # Check if the current page is translated and display it
-            cache_key = (self.current_page, current_language)
-            
-            if cache_key in self.translation_cache:
-                self.translated_text.setText(self.translation_cache[cache_key])
-            else:
-                self.translated_text.setText(f"Select 'Translate' to translate to {current_language}")
-            
-            # Log session load
-            logger.info(f"Session loaded from {session_file}")
-            self.status_label.showMessage(f"Session loaded successfully", 3000)
-            return True
-            
+                logger.debug(f"Loading {len(page_structures)} page structures")
+                
+                for page_num_str, page_data in page_structures.items():
+                    try:
+                        page_num = int(page_num_str)
+                        if isinstance(page_data, dict) and 'structure' in page_data:
+                            self.pdf_display.page_structures[page_num] = {
+                                'timestamp': page_data.get('timestamp', datetime.now().isoformat()),
+                                'structure': page_data['structure']
+                            }
+                        else:
+                            self.pdf_display.page_structures[page_num] = {
+                                'timestamp': datetime.now().isoformat(),
+                                'structure': page_data
+                            }
+                        logger.debug(f"Loaded structure for page {page_num}")
+                    except ValueError as e:
+                        logger.error(f"Error converting page number {page_num_str}: {str(e)}")
+                
+                # Set current page
+                if 'current_page' in session_data:
+                    self.current_page = session_data['current_page']
+                    
+                # Update display
+                self.update_page_display()
+                self.refresh_progress_bar()
+                
+                logger.info(f"Session loaded successfully")
+                logger.info(f"Loaded {len(self.pdf_display.page_structures)} page structures")
+                self.status_label.showMessage("Session loaded", 3000)
+                
+            except Exception as e:
+                logger.error(f"Error applying session data: {str(e)}")
+                logger.error("Full error details:", exc_info=True)
+                self.status_label.showMessage(f"Error loading session: {str(e)}", 5000)
+                
         except Exception as e:
-            error_msg = f"Failed to load session: {str(e)}"
-            logger.error(error_msg)
-            self.status_label.showMessage(error_msg, 3000)
-            return False
+            logger.error(f"Error in load_session: {str(e)}")
+            logger.error("Full error details:", exc_info=True)
+            self.status_label.showMessage(f"Error loading session: {str(e)}", 5000)
 
     def auto_save_session(self):
         """Automatically save the session periodically"""
         if hasattr(self, 'current_pdf_path') and self.current_pdf_path and self.doc:
             self.save_session()
 
+    def processCurrentPage(self):
+        logger.debug("=== Starting Single Page Processing ===")
+        if not self.upstage_client:
+            # Create or update client if API key changed
+            api_key = self.api_key_input.text()
+            if not api_key:
+                QMessageBox.warning(self, 'Error', 'Please enter your API key.')
+                return
+            self.upstage_client = UpstageClient(api_key)
+
+        # Create temporary file for PDF page if needed
+        temp_path = None
+        try:
+            logger.debug("Processing page %d", self.current_page)
+            
+            if self.pdf_document:
+                logger.debug("Saving current page as temporary image")
+                # Save current page as temporary image
+                page = self.pdf_document[self.current_page - 1]
+                pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
+                temp_path = f"temp_page_{self.current_page}.png"
+                pix.save(temp_path)
+                file_path = temp_path
+                logger.debug("Temporary file created: %s", temp_path)
+            else:
+                file_path = self.file_path.text()
+                if not file_path or not os.path.exists(file_path):
+                    QMessageBox.warning(self, 'Error', 'Please select a valid file.')
+                    return
+                logger.debug("Using original file: %s", file_path)
+
+            # Process the page
+            logger.debug("Starting page processing (sync=%s)", self.sync_radio.isChecked())
+            if self.sync_radio.isChecked():
+                self.processSynchronous(file_path, self.current_page)
+            else:
+                self.processAsynchronous(file_path, self.current_page)
+
+        except Exception as e:
+            logger.error("Error in processCurrentPage: %s", str(e))
+            logger.error("Full error details:", exc_info=True)
+            QMessageBox.critical(self, 'Error', f'An error occurred while processing the page: {str(e)}')
+        finally:
+            # Clean up temporary file
+            if temp_path and os.path.exists(temp_path):
+                try:
+                    logger.debug("Cleaning up temporary file: %s", temp_path)
+                    os.remove(temp_path)
+                except Exception as e:
+                    logger.warning("Failed to remove temporary file: %s", str(e))
+
+    def processSynchronous(self, file_path, page_number=None):
+        logger.debug("=== Starting Synchronous Processing ===")
+        url = "https://api.upstage.ai/v1/document-ai/document-parse"
+        files = {"document": open(file_path, "rb")}
+        logger.debug("Sending request for page %s", page_number)
+
+        try:
+            self.output_text.setText("Processing document...")
+            result = self.upstage_client.post(url, files=files)
+            logger.debug("Received synchronous response")
+            self.handleResult(result, page_number)
+        except Exception as e:
+            logger.error("Error in processSynchronous: %s", str(e))
+            logger.error("Full error details:", exc_info=True)
+            raise
+        finally:
+            files["document"].close()
+
+
+    def initialize_upstage_client(self):
+        """Initialize the Upstage client with API key"""
+        try:
+            # Try to get API key from environment variable
+            api_key = os.environ.get('UPSTAGE_API_KEY')
+            
+            # If not in environment, try to get from keyring
+            if not api_key:
+                api_key = keyring.get_password("upstage", "api_key")
+            
+            # If still no API key, prompt user
+            if not api_key:
+                api_key, ok = QInputDialog.getText(
+                    self,
+                    "Upstage API Key Required",
+                    "Please enter your Upstage API key:",
+                    QLineEdit.Password
+                )
+                if ok and api_key:
+                    # Save to keyring for future use
+                    keyring.set_password("upstage", "api_key", api_key)
+                else:
+                    raise ValueError("API key is required for page analysis")
+            
+            self.upstage_client = UpstageClient(api_key)
+            logger.info("Upstage client initialized successfully")
+            
+        except Exception as e:
+            logger.error(f"Error initializing Upstage client: {str(e)}")
+            self.status_label.showMessage("Failed to initialize Upstage client", 5000)
+            raise
+
+class PDFDisplayWidget(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.current_pixmap = None
+        self.page_structures = {}  # {page_num: {'timestamp': str, 'structure': dict}}
+        self.current_page = 0
+        self.setMinimumSize(100, 100)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+
+    def set_page(self, page_num, pixmap):
+        """Set current page number and pixmap"""
+        logger.debug(f"Setting page to {page_num}")
+        self.current_page = page_num
+        self.current_pixmap = pixmap
+        if page_num in self.page_structures:
+            logger.debug(f"Page {page_num} has structure: {self.page_structures[page_num]}")
+        else:
+            logger.debug(f"No structure found for page {page_num}")
+        self.update()
+
+    def set_page_structure(self, page_num, structure):
+        """Set the page structure for a specific page"""
+        logger.debug(f"Setting structure for page {page_num}")
+        logger.debug(f"Structure content: {structure}")
+        self.page_structures[page_num] = {
+            'timestamp': datetime.now().isoformat(),
+            'structure': structure
+        }
+        logger.debug(f"Stored structure: {self.page_structures[page_num]}")
+        self.update()  # Trigger repaint
+
+    def paintEvent(self, event):
+        if not self.current_pixmap:
+            return
+
+        painter = QPainter(self)
+        try:
+            painter.setRenderHint(QPainter.Antialiasing)
+
+            # Calculate scaling to fit the widget while maintaining aspect ratio
+            widget_rect = self.rect()
+            scaled_pixmap = self.current_pixmap.scaled(
+                widget_rect.size(),
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation
+            )
+            
+            # Center the pixmap in the widget
+            x = (widget_rect.width() - scaled_pixmap.width()) // 2
+            y = (widget_rect.height() - scaled_pixmap.height()) // 2
+            
+            # Draw the page
+            painter.drawPixmap(x, y, scaled_pixmap)
+            
+            # Check if we have structure for current page
+            if self.current_page in self.page_structures:
+                logger.debug(f"Drawing structure for page {self.current_page}")
+                structure_data = self.page_structures[self.current_page]
+                
+                # Get the actual structure content
+                if isinstance(structure_data, dict) and 'structure' in structure_data:
+                    analysis_result = structure_data['structure']
+                else:
+                    analysis_result = structure_data  # For backward compatibility
+                
+                logger.debug(f"Analysis result: {analysis_result}")
+                
+                # Set up colors for different element types
+                colors = {
+                    'header': QColor(255, 0, 0, 127),    # Red (semi-transparent)
+                    'heading1': QColor(0, 255, 0, 127),  # Green (semi-transparent)
+                    'paragraph': QColor(0, 0, 255, 127), # Blue (semi-transparent)
+                    'footnote': QColor(255, 165, 0, 127),# Orange (semi-transparent)
+                    'footer': QColor(128, 0, 128, 127)   # Purple (semi-transparent)
+                }
+                
+                # Set up the font for labels
+                font = QFont()
+                font.setPointSize(8)
+                painter.setFont(font)
+                
+                # Calculate scale factors for coordinate conversion
+                scale_x = scaled_pixmap.width() / self.current_pixmap.width()
+                scale_y = scaled_pixmap.height() / self.current_pixmap.height()
+                
+                # Draw boxes for each element
+                if 'elements' in analysis_result:
+                    logger.debug(f"Found {len(analysis_result['elements'])} elements to draw")
+                    for element in analysis_result['elements']:
+                        category = element.get('category', 'unknown')
+                        coords = element.get('coordinates', [])
+                        
+                        if len(coords) >= 4:
+                            # Convert normalized coordinates to pixel coordinates
+                            x1 = int(coords[0]['x'] * self.current_pixmap.width() * scale_x) + x
+                            y1 = int(coords[0]['y'] * self.current_pixmap.height() * scale_y) + y
+                            x2 = int(coords[2]['x'] * self.current_pixmap.width() * scale_x) + x
+                            y2 = int(coords[2]['y'] * self.current_pixmap.height() * scale_y) + y
+                            
+                            # Get color for this element type
+                            color = colors.get(category, QColor(128, 128, 128, 127))
+                            
+                            # Draw the rectangle
+                            painter.setPen(QPen(color, 2))
+                            painter.setBrush(Qt.NoBrush)
+                            painter.drawRect(x1, y1, x2 - x1, y2 - y1)
+                            
+                            # Draw the label
+                            label_rect = QRectF(x1, y1 - 15, 100, 15)
+                            painter.fillRect(label_rect, QColor(255, 255, 255, 200))
+                            painter.setPen(QPen(color.darker()))
+                            painter.drawText(label_rect, Qt.AlignLeft | Qt.AlignVCenter, category)
+                else:
+                    logger.debug("No elements found in analysis result")
+            else:
+                logger.debug(f"No structure available for page {self.current_page}")
+        
+        finally:
+            painter.end()
+
+def analyze_page(self, force_new_analysis=True):
+    """Analyze current page using Upstage API"""
+    try:
+        # Check if analysis already exists and force_new_analysis is False
+        if not force_new_analysis and self.current_page in self.pdf_display.page_structures:
+            logger.info(f"Using cached analysis for page {self.current_page + 1}")
+            stored_data = self.pdf_display.page_structures[self.current_page]
+            result = stored_data['structure'] if isinstance(stored_data, dict) and 'structure' in stored_data else stored_data
+            self.show_page_structure(result)
+            return result
+
+        if not hasattr(self, 'upstage_client'):
+            self.initialize_upstage_client()
+            
+        # Create temporary file for the current page
+        temp_path = f"temp_page_{self.current_page}.png"
+        page = self.doc[self.current_page]
+        pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
+        pix.save(temp_path)
+        
+        try:
+            url = "https://api.upstage.ai/v1/document-ai/document-parse"
+            with open(temp_path, "rb") as img_file:
+                files = {"document": img_file}
+                result = self.upstage_client.post(url, files=files)
+                
+                logger.debug(f"Received analysis result: {result}")
+                
+                # Store the analysis result and update display
+                self.pdf_display.set_page_structure(self.current_page, result)
+                
+                # Show the analysis text
+                self.show_page_structure(result)
+                
+                # Auto-save session after analysis
+                self.save_session()
+                
+                # Show success message
+                self.status_label.showMessage(f"Page {self.current_page + 1} analysis complete", 3000)
+                
+                return result
+                
+        finally:
+            # Clean up temporary file
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+                
+    except Exception as e:
+        error_msg = f"Error during page analysis: {str(e)}"
+        logger.error(error_msg)
+        logger.error("Full error details:", exc_info=True)
+        self.status_label.showMessage(error_msg, 5000)
+        return None
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
