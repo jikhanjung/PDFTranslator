@@ -688,6 +688,11 @@ class PDFViewer(QMainWindow):
         self.translated_text.setReadOnly(True)
         self.translated_text.setPlaceholderText("Translated text will appear here")
         
+        # Text display for page structure
+        self.structure_text = QTextEdit()
+        self.structure_text.setReadOnly(True)
+        self.structure_text.setPlaceholderText("Page structure analysis will appear here")
+        
         # Create a splitter for the text widgets to allow user resizing
         text_splitter = QSplitter(Qt.Vertical)
         
@@ -702,12 +707,18 @@ class PDFViewer(QMainWindow):
         translated_layout.addWidget(QLabel("Translated Text:"))
         translated_layout.addWidget(self.translated_text)
         
+        structure_container = QWidget()
+        structure_layout = QVBoxLayout(structure_container)
+        structure_layout.addWidget(QLabel("Page Structure:"))
+        structure_layout.addWidget(self.structure_text)
+        
         # Add containers to the splitter
         text_splitter.addWidget(original_container)
         text_splitter.addWidget(translated_container)
+        text_splitter.addWidget(structure_container)
         
-        # Set the initial sizes - 1:3 ratio (25% original, 75% translated)
-        text_splitter.setSizes([200, 600])
+        # Set the initial sizes - 1:2:1 ratio (25% original, 50% translated, 25% structure)
+        text_splitter.setSizes([200, 400, 200])
         
         # Add the splitter to the right layout
         right_layout.addWidget(text_splitter)
@@ -727,6 +738,14 @@ class PDFViewer(QMainWindow):
         self.auto_save_timer = QTimer()
         self.auto_save_timer.timeout.connect(self.auto_save_session)
         self.auto_save_timer.start(300000)  # Auto-save every 5 minutes (300,000 ms)
+        
+        # Add show/hide bounding boxes checkbox
+        self.show_boxes_checkbox = QCheckBox("Show Bounding Boxes")
+        self.show_boxes_checkbox.setChecked(True)  # Default to showing boxes
+        self.show_boxes_checkbox.stateChanged.connect(self.pdf_display.toggle_bounding_boxes)
+        
+        # Add the checkbox to the button layout
+        btn_layout.addWidget(self.show_boxes_checkbox)
         
     def open_pdf(self):
         file_path, _ = QFileDialog.getOpenFileName(self, "Open PDF", "", "PDF Files (*.pdf)")
@@ -756,6 +775,9 @@ class PDFViewer(QMainWindow):
             self.doc = fitz.open(file_path)
             self.current_page = 0
             
+            # Update page total label
+            self.page_total.setText(f"/ {len(self.doc)}")
+            
             # Clear translation cache when opening a new document
             self.translation_cache = {}
             
@@ -763,9 +785,10 @@ class PDFViewer(QMainWindow):
             self.detected_language = None
             
             # Update UI
-            self.update_page_display()
-            self.update_buttons()
-            self.extract_text()
+            self.update_page_display()  # This will update the PDF display and text areas
+            self.update_buttons()  # This will properly set the previous button state
+            
+            # Enable buttons
             self.translate_btn.setEnabled(True)
             self.analyze_btn.setEnabled(True)
             self.translate_all_btn.setEnabled(True)  # Enable the Translate All button
@@ -774,28 +797,27 @@ class PDFViewer(QMainWindow):
             
             # Check for existing session and ask if user wants to load it
             pdf_filename = os.path.basename(file_path)
-            base_filename = os.path.splitext(pdf_filename)[0]
-            session_file = f"sessions/{base_filename}_session.json"
+            session_file = os.path.join('sessions', f'{os.path.splitext(pdf_filename)[0]}_session.json')
             
             if os.path.exists(session_file):
-                reply = QMessageBox.question(
-                    self,
-                    "Session Found",
-                    f"A previously saved session was found for this PDF.\nWould you like to restore it?",
-                    QMessageBox.Yes | QMessageBox.No,
-                    QMessageBox.Yes
-                )
+                reply = QMessageBox.question(self, 'Load Session', 
+                    f'Found existing session for {pdf_filename}. Do you want to load it?',
+                    QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
                 
                 if reply == QMessageBox.Yes:
-                    # User wants to load the session
                     self.load_session(session_file)
-                    return  # Skip the rest of the method since we've loaded the session
-            
-            # Clear translated text area
-            self.translated_text.clear()
-            
-            # Rest of the method remains the same...
-            # ...
+                else:
+                    # Initialize text areas with current page content
+                    self.extract_text()  # This will update the original text area
+                    current_language = self.output_language_combo.currentText()
+                    self.translated_text.setText("Select 'Translate' to translate to " + current_language)
+                    self.structure_text.setText("Select 'Analyze' to analyze page structure")
+            else:
+                # Initialize text areas with current page content
+                self.extract_text()  # This will update the original text area
+                current_language = self.output_language_combo.currentText()
+                self.translated_text.setText("Select 'Translate' to translate to " + current_language)
+                self.structure_text.setText("Select 'Analyze' to analyze page structure")
     
     def update_page_display(self):
         """Update the page display with the current page"""
@@ -813,6 +835,24 @@ class PDFViewer(QMainWindow):
             
             # Update page number display
             self.page_input.setText(str(self.current_page + 1))
+            
+            # Extract and display text for the new page
+            self.extract_text()
+            
+            # Check if we have a translation for this page in the current language
+            current_language = self.output_language_combo.currentText()
+            cache_key = (self.current_page, current_language)
+            if cache_key in self.translation_cache:
+                self.translated_text.setText(self.translation_cache[cache_key])
+            else:
+                self.translated_text.setText("Select 'Translate' to translate to " + current_language)
+            
+            # Check if we have page structure analysis for this page
+            if self.current_page in self.pdf_display.page_structures:
+                result = self.pdf_display.page_structures[self.current_page]['structure']
+                self.show_page_structure(result)
+            else:
+                self.structure_text.setText("Select 'Analyze' to analyze page structure")
             
             # Log current state for debugging
             logger.debug(f"Updated display to page {self.current_page}")
@@ -1069,6 +1109,10 @@ class PDFViewer(QMainWindow):
             # If this is for the current page, update the display
             if page_num == self.current_page and language_name == self.output_language_combo.currentText():
                 self.translated_text.setText(translated_text)
+                
+            # Save session to ensure translation is persisted
+            self.save_session()
+            
         except Exception as e:
             # Log error
             logger.error(f"Error handling translation result: {str(e)}")
@@ -1248,7 +1292,7 @@ class PDFViewer(QMainWindow):
             if not result:
                 logger.debug("Result is None or empty")
                 display_text += "No analysis results available (empty result)."
-                self.original_text.setText(display_text)
+                self.structure_text.setText(display_text)
                 return
                 
             # Add API version and model info
@@ -1292,14 +1336,14 @@ class PDFViewer(QMainWindow):
             logger.debug("Final display text:")
             logger.debug(display_text)
             
-            # Update the text display
-            self.original_text.setText(display_text)
+            # Update the structure text display
+            self.structure_text.setText(display_text)
             
         except Exception as e:
             error_msg = f"Error displaying page structure: {str(e)}"
             logger.error(error_msg)
             logger.error("Full error details:", exc_info=True)
-            self.original_text.setText(f"Error displaying analysis results:\n{str(e)}")
+            self.structure_text.setText(f"Error displaying analysis results:\n{str(e)}")
 
     def translate_text(self, force_new_translation=True):
         """Translate the extracted text using OpenAI's GPT API"""
@@ -2200,11 +2244,18 @@ class PDFViewer(QMainWindow):
                         }
                     page_structures[str(page_num)] = structure_data
             
+            # Convert translation_cache to a serializable format
+            translations = {}
+            for (page_num, language), text in self.translation_cache.items():
+                if page_num not in translations:
+                    translations[str(page_num)] = {}
+                translations[str(page_num)][language] = text
+            
             # Prepare main session data
             session_data = {
                 'filename': self.current_file,
                 'current_page': self.current_page,
-                'translations': getattr(self, 'translations', {}),
+                'translations': translations,  # Store the translation cache
                 'page_structures': page_structures,
                 'auto_translate': self.auto_translate_checkbox.isChecked(),
                 'look_ahead': self.look_ahead_checkbox.isChecked(),
@@ -2218,7 +2269,7 @@ class PDFViewer(QMainWindow):
                 },
                 'session_info': {
                     'analyzed_pages': len(page_structures),
-                    'translated_pages': len(getattr(self, 'translations', {})),
+                    'translated_pages': len(translations),  # Count unique pages with translations
                     'app_version': '1.0.0'
                 }
             }
@@ -2228,7 +2279,7 @@ class PDFViewer(QMainWindow):
                 json.dump(session_data, f, ensure_ascii=False, indent=2)
             
             logger.info(f"Session saved to {session_file}")
-            logger.debug(f"Saved {len(page_structures)} page structures")
+            logger.debug(f"Saved {len(page_structures)} page structures and {len(translations)} translations")
             
         except Exception as e:
             logger.error(f"Error saving session: {str(e)}")
@@ -2308,8 +2359,13 @@ class PDFViewer(QMainWindow):
                 
             # Load the data into application
             try:
-                # Load translations
-                self.translations = session_data.get('translations', {})
+                # Load translations into translation_cache
+                self.translation_cache.clear()  # Clear existing cache
+                translations = session_data.get('translations', {})
+                for page_num_str, lang_dict in translations.items():
+                    page_num = int(page_num_str)
+                    for language, text in lang_dict.items():
+                        self.translation_cache[(page_num, language)] = text
                 
                 # Load translation options
                 self.auto_translate_checkbox.setChecked(session_data.get('auto_translate', False))
@@ -2348,6 +2404,7 @@ class PDFViewer(QMainWindow):
                 
                 logger.info(f"Session loaded successfully")
                 logger.info(f"Loaded {len(self.pdf_display.page_structures)} page structures")
+                logger.info(f"Loaded {len(self.translation_cache)} translations")
                 self.status_label.showMessage("Session loaded", 3000)
                 
             except Exception as e:
@@ -2475,6 +2532,7 @@ class PDFDisplayWidget(QWidget):
         self.current_page = 0
         self.setMinimumSize(100, 100)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.show_bounding_boxes = True  # Default to showing boxes
 
     def set_page(self, page_num, pixmap):
         """Set current page number and pixmap"""
@@ -2496,6 +2554,11 @@ class PDFDisplayWidget(QWidget):
             'structure': structure
         }
         logger.debug(f"Stored structure: {self.page_structures[page_num]}")
+        self.update()  # Trigger repaint
+
+    def toggle_bounding_boxes(self, state):
+        """Toggle the visibility of bounding boxes"""
+        self.show_bounding_boxes = state
         self.update()  # Trigger repaint
 
     def paintEvent(self, event):
@@ -2521,8 +2584,8 @@ class PDFDisplayWidget(QWidget):
             # Draw the page
             painter.drawPixmap(x, y, scaled_pixmap)
             
-            # Check if we have structure for current page
-            if self.current_page in self.page_structures:
+            # Check if we have structure for current page and if boxes should be shown
+            if self.show_bounding_boxes and self.current_page in self.page_structures:
                 logger.debug(f"Drawing structure for page {self.current_page}")
                 structure_data = self.page_structures[self.current_page]
                 
@@ -2582,7 +2645,7 @@ class PDFDisplayWidget(QWidget):
                 else:
                     logger.debug("No elements found in analysis result")
             else:
-                logger.debug(f"No structure available for page {self.current_page}")
+                logger.debug(f"No structure available for page {self.current_page} or boxes are hidden")
         
         finally:
             painter.end()
