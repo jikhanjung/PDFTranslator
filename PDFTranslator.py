@@ -176,7 +176,7 @@ class TranslationWorker(QThread):
             logger.debug(f"Languages: {self.input_language} -> {self.output_language_name}")
             
             # Check if the text is structured
-            is_structured = any(tag in self.text for tag in ['<header>', '<heading1>', '<paragraph>', '<footnote>', '<footer>'])
+            is_structured = any(tag in self.text for tag in ['<header>', '<heading1>', '<paragraph>', '<footnote>', '<footer>', '<caption>'])
             logger.debug(f"Text is structured: {is_structured}")
             
             if is_structured:
@@ -213,7 +213,7 @@ class TranslationWorker(QThread):
                 response = openai.chat.completions.create(
                     model=self.model,
                     messages=messages,
-                    temperature=0.3,
+                    temperature=0.2,
                     max_tokens=2000
                 )
                 translated = response.choices[0].message.content.strip()
@@ -221,7 +221,7 @@ class TranslationWorker(QThread):
                 response = openai.ChatCompletion.create(
                     model=self.model,
                     messages=messages,
-                    temperature=0.3,
+                    temperature=0.2,
                     max_tokens=2000
                 )
                 translated = response.choices[0].message['content'].strip()
@@ -600,6 +600,10 @@ class PDFViewer(QMainWindow):
         self.analyze_btn.clicked.connect(lambda: self.analyze_page(True))
         self.analyze_btn.setEnabled(False)
 
+        self.analyze_all_btn = QPushButton('Analyze All')
+        self.analyze_all_btn.clicked.connect(lambda: self.analyze_all(True))
+        self.analyze_all_btn.setEnabled(False)
+
         # Add checkbox for showing bounding boxes
         self.show_boxes_checkbox = QCheckBox("Show Bounding Boxes")
         self.show_boxes_checkbox.setChecked(True)
@@ -642,6 +646,7 @@ class PDFViewer(QMainWindow):
         top_btn_layout.addWidget(self.next_btn)
         top_btn_layout.addLayout(page_layout)
         top_btn_layout.addWidget(self.analyze_btn)
+        top_btn_layout.addWidget(self.analyze_all_btn)
         top_btn_layout.addWidget(self.show_boxes_checkbox)
         top_btn_layout.addWidget(self.translate_btn)
         top_btn_layout.addWidget(self.translate_all_btn)
@@ -1565,6 +1570,26 @@ class PDFViewer(QMainWindow):
         
         return False
     
+    def analyze_all(self, force_new_analysis=True):
+        """Analyze all pages using Upstage API"""
+        logger.info("Analyzing all pages")
+        # wait cursor
+
+        QApplication.setOverrideCursor(QCursor(Qt.WaitCursor))
+
+        for page_num in range(len(self.doc)):
+            if self.document_data['page_structures'].get(str(page_num+1)):
+                logger.info(f"Using cached analysis for page {page_num+1}")
+                continue
+            else:
+                logger.info(f"Analyzing page {page_num+1}")
+                self.go_to_page(page_num+1)
+                self.analyze_page(True)
+        
+        # restore cursor
+        QApplication.restoreOverrideCursor()
+
+
     def analyze_page(self, force_new_analysis=True):
         """Analyze current page using Upstage API"""
         logger.info(f"Analyzing page {self.current_page + 1}")
@@ -2281,19 +2306,19 @@ class PDFViewer(QMainWindow):
                 return
         
         # Estimate tokens and cost
-        token_estimate = self.estimate_document_tokens()
-        cost_estimate = self.estimate_translation_cost(token_estimate)
+        #token_estimate = self.estimate_document_tokens()
+        #cost_estimate = self.estimate_translation_cost(token_estimate)
         
         # Show confirmation dialog with cost estimate
-        dialog = TranslateAllDialog(
-            self, 
-            page_count=len(self.doc), 
-            token_estimate=token_estimate, 
-            cost_estimate=cost_estimate
-        )
+        #dialog = TranslateAllDialog(
+        #    self, 
+        #    page_count=len(self.doc), 
+        #    token_estimate=token_estimate, 
+        #    cost_estimate=cost_estimate
+        #)
         
-        if dialog.exec_() != QDialog.Accepted:
-            return  # User canceled
+        #if dialog.exec_() != QDialog.Accepted:
+        #    return  # User canceled
         
         # Start translating all pages
         self.translate_all_pages()
@@ -2316,7 +2341,7 @@ class PDFViewer(QMainWindow):
         model = self.get_model()
         
         # Translate the current page if not already in cache
-        current_cache_key = (self.current_page, output_lang_name)
+        current_cache_key = f"{self.current_page}_{output_lang_name}"
         if current_cache_key not in self.document_data['translations']:
             self.translate_text(False)  # Translate current page without forcing
         
@@ -2324,41 +2349,25 @@ class PDFViewer(QMainWindow):
         pending_pages = []
         
         # Translate pages in reverse order except current page
-        for i in range(len(self.doc) - 1, -1, -1):
-            if i == self.current_page:
-                continue  # Skip current page as it's already done
+        for i in range(len(self.doc)):
+            #if i == self.current_page:
+            #    continue  # Skip current page as it's already done
                 
-            cache_key = (i, output_lang_name)
+            cache_key = f"{i}_{output_lang_name}"
             if cache_key not in self.document_data['translations']:
                 pending_pages.append(i)
         
         if pending_pages:
-            # Confirm with user
-            token_estimate = self.estimate_document_tokens()
-            cost_estimate = self.estimate_translation_cost(token_estimate)
-            
-            dialog = TranslateAllDialog(self, len(pending_pages), token_estimate, cost_estimate)
-            if dialog.exec_() != QDialog.Accepted:
-                return
-            
             # Process first batch of pages
-            logger.info(f"Starting translation of {len(pending_pages)} pages")
-            self.status_label.showMessage(f"Translating document ({len(pending_pages)} pages)...")
-            
-            # Translate remaining pages in batches to avoid overloading
-            if pending_pages:
-                # Start with a small batch of pages
-                batch_size = min(5, len(pending_pages))
-                current_batch = pending_pages[:batch_size]
-                pending_pages = pending_pages[batch_size:]
+            # Process current batch
+            for page_num in pending_pages:
+                # show the page
+                self.go_to_page(page_num+1)
+                # analyze page
+                self.analyze_page(page_num+1)
+                # translate page
+                self.translate_text(True)
                 
-                # Process current batch
-                for page_num in current_batch:
-                    self.start_page_translation(page_num, input_lang_code, output_lang_code, output_lang_name, model)
-                
-                # Schedule checking for progress
-                QTimer.singleShot(5000, lambda: self.check_bulk_translation_progress(pending_pages, input_lang_code, output_lang_code, output_lang_name, model))
-
     def start_page_translation(self, page_num, input_lang_code, output_lang_code, output_lang_name, model):
         """Start translation for a specific page"""
         try:
@@ -2780,7 +2789,7 @@ class PDFViewer(QMainWindow):
                 import subprocess
                 subprocess.call(('xdg-open', file_path))
 
-    def go_to_page(self):
+    def go_to_page(self, page_num):
         """Handle page navigation when user enters a page number"""
         try:
             if not self.doc:
@@ -2788,7 +2797,7 @@ class PDFViewer(QMainWindow):
                 
             # Get the entered page number (1-based)
             try:
-                new_page = int(self.page_input.text()) - 1
+                new_page = int(page_num) - 1
             except ValueError:
                 return
                 
@@ -2877,6 +2886,7 @@ class PDFViewer(QMainWindow):
             # Enable buttons
             self.translate_btn.setEnabled(True)
             self.analyze_btn.setEnabled(True)
+            self.analyze_all_btn.setEnabled(True)
             self.translate_all_btn.setEnabled(True)  # Enable the Translate All button
             self.export_btn.setEnabled(True)  # Enable the Export button
             self.save_session_btn.setEnabled(True)  # Enable the Save Session button
