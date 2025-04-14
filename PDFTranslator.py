@@ -1,28 +1,34 @@
 import sys
-import fitz  # PyMuPDF
-from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
-                            QHBoxLayout, QPushButton, QFileDialog, QLabel, 
-                            QScrollArea, QSizePolicy, QSplitter, QTextEdit, QComboBox,
-                            QDialog, QLineEdit, QDialogButtonBox, QMessageBox,
-                            QStatusBar, QInputDialog, QGroupBox, QCheckBox,
-                            QTabWidget)
-from PyQt5.QtGui import QPixmap, QImage, QCursor, QPainter, QPen, QColor, QFont, QBrush
-from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QRectF
 import os
-import openai  # Revert to standard import
-from dotenv import load_dotenv
-import time
-import json
-import keyring  # For secure storage of API key
-from fpdf import FPDF  # Replace with fpdf2 for better Unicode support
-import logging
-from datetime import datetime
-import pickle
-import base64
-import os.path
-import httpx
 import re
-import requests
+import fitz
+import openai
+import time
+import datetime
+import json
+import logging
+import keyring
+import httpx
+from dotenv import load_dotenv
+from PyQt5.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
+    QLabel, QTextEdit, QFileDialog, QComboBox, QCheckBox, QStatusBar, 
+    QSplitter, QScrollArea, QLineEdit, QMessageBox, QDialog, QDialogButtonBox,
+    QFormLayout, QTabWidget, QRadioButton, QButtonGroup, QSpinBox, QGroupBox,
+    QProgressBar, QSizePolicy, QMenu, QAction
+)
+from PyQt5.QtGui import (
+    QPixmap, QPainter, QColor, QTextCursor, QPen, QBrush, QImage, QFont, 
+    QFontMetrics, QCursor, QTextFormat, QTextCharFormat, QPalette
+)
+from PyQt5.QtCore import (
+    Qt, QThread, pyqtSignal, QRectF, QSize, QTimer, QRect, QPoint, QSettings
+)
+
+# Setup logging
+if not os.path.exists('logs'):
+    os.makedirs('logs')
+log_file = os.path.join('logs', f'pdf_translator_{datetime.datetime.now().strftime("%Y-%m-%d")}.log')
 
 # Load environment variables for API keys
 load_dotenv()
@@ -52,7 +58,7 @@ def setup_logging():
         os.makedirs('logs')
         
     # Use date in filename to create a new log file each day
-    log_filename = f"logs/pdf_translator_{datetime.now().strftime('%Y-%m-%d')}.log"
+    log_filename = f"logs/pdf_translator_{datetime.datetime.now().strftime('%Y-%m-%d')}.log"
     
     # Configure logging
     logging.basicConfig(
@@ -145,6 +151,7 @@ class UpstageClient:
         except Exception as e:
             logger.error(f"An unexpected error occurred: {e}")
             raise
+
 # Create a worker thread for background translation
 class TranslationWorker(QThread):
     # Signal to emit when translation is complete
@@ -500,41 +507,330 @@ class TranslationProgressBar(QWidget):
 class PDFViewer(QMainWindow):
     def __init__(self):
         super().__init__()
-        
-        # Set up logging
+
         global logger
-        logger = setup_logging()
+        logger = setup_logging()        
+        # Initialize settings
+        self.settings = QSettings("PDFTranslator", "Settings")
         
-        self.current_file = None
-        self.current_page = 0
+        # Initialize variables
         self.doc = None
-        
-        # Centralized document data storage
+        self.current_page = 0
+        self.current_file = None
+        self.extracted_text = ""
         self.document_data = {
-            'page_structures': {},  # {page_num: {'timestamp': str, 'structure': dict}}
-            'translations': {},     # {page_num: {language: translation}}
-            'metadata': {
-                'title': '',
-                'author': '',
-                'subject': '',
-                'keywords': ''
-            }
+            'page_structures': {},
+            'translations': {},
+            'metadata': {}
         }
+        self.active_workers = []
+        self.detected_language = None
         
-        # Thread management
-        self.active_workers = []  # Keep track of all active worker threads
-        self.look_ahead_worker = None  # Keep reference to look-ahead worker thread
-        
-        # Check for API key on startup
-        self.check_api_key()
-        
+        # Initialize UI
         self.init_ui()
         
+        # Apply settings
+        self.apply_settings()
+        
+    def init_ui(self):
+        self.setWindowTitle('PDF Translator')
+        self.setGeometry(100, 100, 1200, 800)  # Wider window for two panes
+        
+        # Create central widget and main layout
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        main_layout = QVBoxLayout(central_widget)
+        
+        # Create top button layout
+        top_btn_layout = QHBoxLayout()
+        
+        self.open_btn = QPushButton('Open PDF')
+        self.open_btn.clicked.connect(self.open_pdf)
+        
+        self.prev_btn = QPushButton('Previous Page')
+        self.prev_btn.clicked.connect(self.prev_page)
+        self.prev_btn.setEnabled(False)
+        
+        self.next_btn = QPushButton('Next Page')
+        self.next_btn.clicked.connect(self.next_page)
+        self.next_btn.setEnabled(False)
+        
+        self.page_input = QLineEdit()
+        self.page_input.setFixedWidth(50)
+        self.page_input.setAlignment(Qt.AlignCenter)
+        self.page_total = QLabel('/ 0')
+
+        # Create page navigation layout
+        page_layout = QHBoxLayout()
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.setSpacing(5)
+        page_layout.addWidget(self.page_input)
+        page_layout.addWidget(self.page_total)
+
+        # Connect the enter/return pressed signal
+        self.page_input.returnPressed.connect(self.go_to_page)
+        
+        # Add analyze button
+        self.analyze_btn = QPushButton('Analyze')
+        self.analyze_btn.clicked.connect(lambda: self.analyze_page(True))
+        self.analyze_btn.setEnabled(False)
+
+        # Add translate button
+        self.translate_btn = QPushButton('Translate')
+        self.translate_btn.clicked.connect(lambda: self.translate_text(True))
+        self.translate_btn.setEnabled(False)
+        
+        # Add translate all button
+        self.translate_all_btn = QPushButton('Translate All')
+        self.translate_all_btn.clicked.connect(self.translate_all)
+        self.translate_all_btn.setEnabled(False)
+        
+        # Add export button
+        self.export_btn = QPushButton('Export')
+        self.export_btn.clicked.connect(self.export_translation)
+        self.export_btn.setEnabled(False)
+        self.export_btn.setToolTip("Export translated document")
+        
+        # Create session management buttons
+        self.save_session_btn = QPushButton('Save Session')
+        self.save_session_btn.clicked.connect(self.save_session)
+        self.save_session_btn.setEnabled(False)
+        self.save_session_btn.setToolTip("Save current session state")
+        
+        self.load_session_btn = QPushButton('Load Session')
+        self.load_session_btn.clicked.connect(self.load_session)
+        self.load_session_btn.setToolTip("Load a previously saved session")
+        
+        # Add session buttons to a layout
+        session_layout = QHBoxLayout()
+        session_layout.addWidget(self.save_session_btn)
+        session_layout.addWidget(self.load_session_btn)
+        
+        # Add widgets to top button layout
+        top_btn_layout.addWidget(self.open_btn)
+        top_btn_layout.addWidget(self.prev_btn)
+        top_btn_layout.addWidget(self.next_btn)
+        top_btn_layout.addLayout(page_layout)
+        top_btn_layout.addWidget(self.analyze_btn)
+        top_btn_layout.addWidget(self.translate_btn)
+        top_btn_layout.addWidget(self.translate_all_btn)
+        top_btn_layout.addWidget(self.export_btn)
+        
+        # Create a widget for the status and progress bar at the bottom
+        status_layout = QHBoxLayout()
+        
+        # Create a status bar widget
+        self.status_label = QStatusBar()
+        
+        # Create the translation progress widget
+        self.translation_progress = TranslationProgressBar()
+        
+        # Add widgets to the status layout
+        status_layout.addWidget(self.status_label, 8)
+        status_layout.addWidget(self.translation_progress, 2)
+        
+        # Create text display areas
+        self.original_text = QTextEdit()
+        self.original_text.setReadOnly(True)
+        
+        self.translated_text = QTextEdit()
+        self.translated_text.setReadOnly(True)
+        
+        self.structure_text = QTextEdit()
+        self.structure_text.setReadOnly(True)
+        
+        # Create tab widget for original text and structure
+        left_tabs = QTabWidget()
+        left_tabs.addTab(self.original_text, "Original Text")
+        left_tabs.addTab(self.structure_text, "Structure")
+        
+        # Create PDF display widget
+        self.pdf_display = PDFDisplayWidget()
+        
+        # Create translated display widget
+        self.translated_display = TranslatedPageDisplayWidget()
+        
+        # Create tabs for PDF view and translated view
+        self.view_tabs = QTabWidget()
+        self.view_tabs.addTab(self.pdf_display, "PDF View")
+        self.view_tabs.addTab(self.translated_display, "Translated View")
+        self.view_tabs.currentChanged.connect(self.on_view_tab_changed)
+        
+        # Create a splitter for left and right panes
+        display_splitter = QSplitter(Qt.Horizontal)
+        display_splitter.addWidget(self.view_tabs)
+        
+        # Create a splitter for text areas
+        text_splitter = QSplitter(Qt.Vertical)
+        text_splitter.addWidget(left_tabs)
+        text_splitter.addWidget(self.translated_text)
+        text_splitter.setSizes([300, 300])  # Set initial sizes
+        
+        # Add the text splitter to the display splitter
+        display_splitter.addWidget(text_splitter)
+        display_splitter.setSizes([600, 600])  # Set initial sizes
+        
+        # Make splitter the central widget of the main splitter
+        self.splitter = display_splitter
+        
+        # Add checkbox for showing bounding boxes
+        self.show_boxes_checkbox = QCheckBox("Show Bounding Boxes")
+        self.show_boxes_checkbox.setChecked(True)
+        self.show_boxes_checkbox.toggled.connect(self.pdf_display.toggle_bounding_boxes)
+        
+        # Add the status bar
+        self.statusBar().addPermanentWidget(self.show_boxes_checkbox)
+        
+        # Create menu bar
+        menubar = self.menuBar()
+        
+        # File menu
+        file_menu = menubar.addMenu('File')
+        
+        open_action = QAction('Open PDF', self)
+        open_action.triggered.connect(self.open_pdf)
+        file_menu.addAction(open_action)
+        
+        save_session_action = QAction('Save Session', self)
+        save_session_action.triggered.connect(self.save_session)
+        file_menu.addAction(save_session_action)
+        
+        load_session_action = QAction('Load Session', self)
+        load_session_action.triggered.connect(self.load_session)
+        file_menu.addAction(load_session_action)
+        
+        file_menu.addSeparator()
+        
+        export_action = QAction('Export Translation', self)
+        export_action.triggered.connect(self.export_translation)
+        file_menu.addAction(export_action)
+        
+        file_menu.addSeparator()
+        
+        exit_action = QAction('Exit', self)
+        exit_action.triggered.connect(self.close)
+        file_menu.addAction(exit_action)
+        
+        # Tools menu
+        tools_menu = menubar.addMenu('Tools')
+        
+        analyze_action = QAction('Analyze Page', self)
+        analyze_action.triggered.connect(lambda: self.analyze_page(True))
+        tools_menu.addAction(analyze_action)
+        
+        translate_action = QAction('Translate Page', self)
+        translate_action.triggered.connect(lambda: self.translate_text(True))
+        tools_menu.addAction(translate_action)
+        
+        translate_all_action = QAction('Translate All Pages', self)
+        translate_all_action.triggered.connect(self.translate_all)
+        tools_menu.addAction(translate_all_action)
+        
+        # Settings menu
+        settings_menu = menubar.addMenu('Settings')
+        
+        preferences_action = QAction('Preferences', self)
+        preferences_action.triggered.connect(self.show_preferences)
+        settings_menu.addAction(preferences_action)
+        
+        # Add everything to main layout
+        main_layout.addLayout(top_btn_layout)
+        #main_layout.addLayout(session_layout)
+        main_layout.addWidget(self.splitter)
+        main_layout.addLayout(status_layout)
+        
+        # Set focus to the main window
+        self.setFocus()
+        
+        # Initialize variables for translation worker
+        self.worker = None
+        
+        # Log the UI initialization
+        logger.info("UI initialized")
+        
+    def show_preferences(self):
+        """Show the preferences dialog"""
+        dialog = PreferencesDialog(self)
+        if dialog.exec_():
+            self.apply_settings()
+            
+    def apply_settings(self):
+        """Apply settings from QSettings"""
+        # Update debug level
+        debug_level = self.settings.value("debug_level", logging.INFO, int)
+        logger.setLevel(debug_level)
+        logger.debug(f"Debug level set to: {debug_level}")
+        
+        # If we have an open document, update the interface
+        if self.doc:
+            # Check if the current language has changed, and if so refresh translations
+            output_language_name = self.get_output_language_name()
+            translation = self.get_translation(self.current_page, output_language_name)
+            if translation:
+                self.display_translation(translation)
+            else:
+                # No translation available for this language, clear and show message
+                self.translated_text.setText(f"Select 'Translate' to translate to {output_language_name}")
+                
+            # Update the progress bar
+            self.refresh_progress_bar()
+            
+            # If auto-translate is enabled, start translation
+            if self.is_auto_translate_enabled() and not self.get_translation(self.current_page, output_language_name):
+                self.translate_text(False)  # Don't force new translation
+                
+            # If look-ahead is enabled, check next page
+            if self.is_look_ahead_enabled() and self.current_page < len(self.doc) - 1:
+                self.start_look_ahead_translation()
+        
+    def on_settings_changed(self):
+        """Handle when settings have changed from the preferences dialog"""
+        self.apply_settings()
+        # If there's an open document, refresh the current page translation if possible
+        if self.doc:
+            output_language_name = self.settings.value("output_language_name", "Korean", str)
+            translation = self.get_translation(self.current_page, output_language_name)
+            if translation:
+                self.display_translation(translation)
+            self.refresh_progress_bar()
+
+    def get_input_language(self):
+        """Get input language from settings"""
+        return self.settings.value("input_language", "en", str)
+        
+    def get_input_language_name(self):
+        """Get input language name from settings"""
+        return self.settings.value("input_language_name", "English", str)
+        
+    def get_output_language(self):
+        """Get output language from settings"""
+        return self.settings.value("output_language", "ko", str)
+        
+    def get_output_language_name(self):
+        """Get output language name from settings"""
+        return self.settings.value("output_language_name", "Korean", str)
+        
+    def get_model(self):
+        """Get model from settings"""
+        return self.settings.value("model", "gpt-4o-mini", str)
+        
+    def get_model_name(self):
+        """Get model name from settings"""
+        return self.settings.value("model_name", "GPT-4o mini", str)
+        
+    def is_auto_translate_enabled(self):
+        """Check if auto-translate is enabled"""
+        return self.settings.value("auto_translate", False, bool)
+        
+    def is_look_ahead_enabled(self):
+        """Check if look-ahead translation is enabled"""
+        return self.settings.value("look_ahead", False, bool)
+    
     def set_page_structure(self, page_num, structure):
         """Set the page structure for a specific page"""
         logger.debug(f"Setting structure for page {page_num}")
         self.document_data['page_structures'][page_num] = {
-            'timestamp': datetime.now().isoformat(),
+            'timestamp': datetime.datetime.now().isoformat(),
             'structure': structure
         }
         logger.debug(f"Stored structure: {self.document_data['page_structures'][page_num]}")
@@ -594,13 +890,9 @@ class PDFViewer(QMainWindow):
                 logger.debug("No current file to save session for")
                 return
                 
-            # Create sessions directory if it doesn't exist
-            if not os.path.exists('sessions'):
-                os.makedirs('sessions')
-                
             # Get base filename without extension
             base_name = os.path.splitext(os.path.basename(self.current_file))[0]
-            session_file = os.path.join('sessions', f'{base_name}_session.json')
+            session_file = os.path.join(self.pdf_directory, f'{base_name}.json')
             
             # Convert tuple keys to strings in translations
             translations_for_json = {}
@@ -616,9 +908,9 @@ class PDFViewer(QMainWindow):
                     'translations': translations_for_json,
                     'metadata': self.document_data['metadata']
                 },
-                'auto_translate': self.auto_translate_checkbox.isChecked(),
-                'look_ahead': self.look_ahead_checkbox.isChecked(),
-                'timestamp': datetime.now().isoformat(),
+                'auto_translate': self.is_auto_translate_enabled(),
+                'look_ahead': self.is_look_ahead_enabled(),
+                'timestamp': datetime.datetime.now().isoformat(),
                 'total_pages': len(self.doc) if self.doc else 0,
                 'session_info': {
                     'analyzed_pages': len(self.document_data['page_structures']),
@@ -727,7 +1019,6 @@ class PDFViewer(QMainWindow):
                 self.current_page = 0
                 
                 # Update UI
-                self.page_label.setText(f"Page {self.current_page + 1} of {self.total_pages}")
                 self.update_page_display()
                 self.update_buttons()
                 
@@ -737,7 +1028,8 @@ class PDFViewer(QMainWindow):
                     self.pdf_display.toggle_bounding_boxes(True)
                 
                 # Display translation for current page if available
-                current_language = self.output_language_combo.currentText()
+                #current_language = self.output_language_combo.currentText()
+                current_language = self.get_output_language_name()
                 translation = self.get_translation(self.current_page, current_language)
                 if translation:
                     logger.debug(f"Found translation for page {self.current_page} in {current_language}")
@@ -759,380 +1051,6 @@ class PDFViewer(QMainWindow):
             logger.error("Full error details:", exc_info=True)
             QMessageBox.warning(self, "Error", f"Failed to load session: {str(e)}")
         
-    def init_ui(self):
-        self.setWindowTitle('PDF Translator')
-        self.setGeometry(100, 100, 1200, 800)  # Wider window for two panes
-        
-        # Create central widget and main layout
-        central_widget = QWidget()
-        self.setCentralWidget(central_widget)
-        main_layout = QVBoxLayout(central_widget)
-        
-        # Create top button layout
-        top_btn_layout = QHBoxLayout()
-        
-        self.open_btn = QPushButton('Open PDF')
-        self.open_btn.clicked.connect(self.open_pdf)
-        
-        self.prev_btn = QPushButton('Previous Page')
-        self.prev_btn.clicked.connect(self.prev_page)
-        self.prev_btn.setEnabled(False)
-        
-        self.next_btn = QPushButton('Next Page')
-        self.next_btn.clicked.connect(self.next_page)
-        self.next_btn.setEnabled(False)
-        
-        self.page_label = QLabel('Page:')
-        self.page_input = QLineEdit()
-        self.page_input.setFixedWidth(50)
-        self.page_input.setAlignment(Qt.AlignCenter)
-        self.page_total = QLabel('/ 0')
-
-        # Create page navigation layout
-        page_layout = QHBoxLayout()
-        page_layout.setContentsMargins(0, 0, 0, 0)
-        page_layout.setSpacing(5)
-        page_layout.addWidget(self.page_label)
-        page_layout.addWidget(self.page_input)
-        page_layout.addWidget(self.page_total)
-
-        # Connect the enter/return pressed signal
-        self.page_input.returnPressed.connect(self.go_to_page)
-
-        # Add input language selection combo box with English as default
-        self.input_language_combo = QComboBox()
-        self.input_language_combo.addItem("English", "en")
-        self.input_language_combo.addItem("Auto-detect", "auto")
-        self.input_language_combo.addItem("Spanish", "es")
-        self.input_language_combo.addItem("French", "fr")
-        self.input_language_combo.addItem("German", "de")
-        self.input_language_combo.addItem("Italian", "it")
-        self.input_language_combo.addItem("Portuguese", "pt")
-        self.input_language_combo.addItem("Russian", "ru")
-        self.input_language_combo.addItem("Japanese", "ja")
-        self.input_language_combo.addItem("Korean", "ko")
-        self.input_language_combo.addItem("Chinese", "zh")
-        
-        # Add output language selection combo box
-        self.output_language_combo = QComboBox()
-        self.output_language_combo.addItem("Korean", "ko")
-        self.output_language_combo.addItem("Japanese", "ja")
-        self.output_language_combo.addItem("Chinese", "zh")
-        self.output_language_combo.addItem("Spanish", "es")
-        self.output_language_combo.addItem("French", "fr")
-        
-        # Connect language change signal
-        self.output_language_combo.currentTextChanged.connect(self.on_output_language_changed)
-        
-        # Add model selection combo box
-        self.model_combo = QComboBox()
-        self.model_combo.addItem("GPT-3.5 Turbo", "gpt-3.5-turbo")
-        self.model_combo.addItem("GPT-4 Turbo", "gpt-4-turbo")
-        self.model_combo.addItem("GPT-4o mini", "gpt-4o-mini")
-        # select the default model
-        self.model_combo.setCurrentIndex(2)
-        self.model_combo.setToolTip("Select the AI model for translation")
-        
-        # Add debug level selection combo box
-        self.debug_level_combo = QComboBox()
-        self.debug_level_combo.addItem("Error", logging.ERROR)
-        self.debug_level_combo.addItem("Warning", logging.WARNING)
-        self.debug_level_combo.addItem("Info", logging.INFO)
-        self.debug_level_combo.addItem("Debug", logging.DEBUG)
-        self.debug_level_combo.setToolTip("Set logging verbosity level")
-        
-        # Connect debug level change signal
-        self.debug_level_combo.currentIndexChanged.connect(self.on_debug_level_changed)
-
-        # Add analyze button
-        self.analyze_btn = QPushButton('Analyze')
-        self.analyze_btn.clicked.connect(lambda: self.analyze_page(True))
-        self.analyze_btn.setEnabled(False)
-
-        # Add translate button
-        self.translate_btn = QPushButton('Translate')
-        self.translate_btn.clicked.connect(lambda: self.translate_text(True))
-        self.translate_btn.setEnabled(False)
-        
-        # Add translate all button
-        self.translate_all_btn = QPushButton('Translate All')
-        self.translate_all_btn.clicked.connect(self.translate_all)
-        self.translate_all_btn.setEnabled(False)
-        
-        # Add export button
-        self.export_btn = QPushButton('Export')
-        self.export_btn.clicked.connect(self.export_translation)
-        self.export_btn.setEnabled(False)
-        self.export_btn.setToolTip("Export translated document")
-        
-        # Create session management buttons
-        self.save_session_btn = QPushButton('Save Session')
-        self.save_session_btn.clicked.connect(self.save_session)
-        self.save_session_btn.setEnabled(False)
-        self.save_session_btn.setToolTip("Save current session state")
-        
-        self.load_session_btn = QPushButton('Load Session')
-        self.load_session_btn.clicked.connect(self.load_session)
-        self.load_session_btn.setToolTip("Load a previously saved session")
-        
-        # Add session buttons to a new layout
-        session_layout = QHBoxLayout()
-        session_layout.addWidget(self.save_session_btn)
-        session_layout.addWidget(self.load_session_btn)
-        
-        # Create translation options group
-        translation_options_layout = QHBoxLayout()
-        
-        # Create checkboxes
-        self.auto_translate_checkbox = QCheckBox("Auto-translate")
-        self.auto_translate_checkbox.setToolTip("Automatically translate when changing pages")
-        self.auto_translate_checkbox.setChecked(False)
-        
-        self.look_ahead_checkbox = QCheckBox("Look-ahead translation")
-        self.look_ahead_checkbox.setToolTip("Pre-translate next page in background")
-        self.look_ahead_checkbox.setChecked(False)
-        
-        # Add checkboxes to the translation options layout
-        translation_options_layout.addWidget(self.auto_translate_checkbox)
-        translation_options_layout.addWidget(self.look_ahead_checkbox)
-        
-        # Add widgets to top button layout
-        top_btn_layout.addWidget(self.open_btn)
-        top_btn_layout.addWidget(self.prev_btn)
-        top_btn_layout.addWidget(self.next_btn)
-        top_btn_layout.addLayout(page_layout)
-        top_btn_layout.addWidget(QLabel("From:"))
-        top_btn_layout.addWidget(self.input_language_combo)
-        top_btn_layout.addWidget(QLabel("To:"))
-        top_btn_layout.addWidget(self.output_language_combo)
-        top_btn_layout.addWidget(QLabel("Model:"))
-        top_btn_layout.addWidget(self.model_combo)
-        top_btn_layout.addWidget(QLabel("Debug:"))
-        top_btn_layout.addWidget(self.debug_level_combo)
-        top_btn_layout.addWidget(self.analyze_btn)
-        top_btn_layout.addWidget(self.translate_btn)
-        top_btn_layout.addWidget(self.translate_all_btn)
-        top_btn_layout.addWidget(self.export_btn)
-        
-        # Create a widget for the status and progress bar at the bottom
-        status_layout = QHBoxLayout()
-        
-        # Create a status bar widget
-        self.status_label = QStatusBar()
-        
-        # Create the translation progress widget
-        self.translation_progress = TranslationProgressBar()
-        
-        # Add widgets to the status layout
-        status_layout.addWidget(self.status_label, 8)
-        status_layout.addWidget(self.translation_progress, 2)
-        
-        # Create splitter for the two panes
-        self.splitter = QSplitter(Qt.Horizontal)
-        
-        # Left pane - PDF View
-        self.left_widget = QWidget()
-        left_layout = QVBoxLayout(self.left_widget)
-        
-        # Create tab widget for original and translated views
-        self.view_tabs = QTabWidget()
-        self.view_tabs.setTabPosition(QTabWidget.North)
-        
-        # Create scroll area for PDF display
-        self.scroll_area = QScrollArea()
-        self.scroll_area.setWidgetResizable(True)
-        
-        # Create label to display PDF
-        self.pdf_display = PDFDisplayWidget(self)
-        self.scroll_area.setWidget(self.pdf_display)
-        
-        # Create scroll area for translated page display
-        self.translated_scroll_area = QScrollArea()
-        self.translated_scroll_area.setWidgetResizable(True)
-        
-        # Create widget to display translated page
-        self.translated_display = TranslatedPageDisplayWidget(self)
-        self.translated_scroll_area.setWidget(self.translated_display)
-        
-        # Add tabs to the tab widget
-        self.view_tabs.addTab(self.scroll_area, "Original")
-        self.view_tabs.addTab(self.translated_scroll_area, "Translated")
-        
-        # Connect tab change signal
-        self.view_tabs.currentChanged.connect(self.on_view_tab_changed)
-        
-        left_layout.addWidget(self.view_tabs)
-        
-        # Right pane - Translation
-        self.right_widget = QWidget()
-        right_layout = QVBoxLayout(self.right_widget)
-        
-        # Text display for extracted text
-        self.original_text = QTextEdit()
-        self.original_text.setReadOnly(True)
-        self.original_text.setPlaceholderText("Original text will appear here")
-        
-        # Text display for translated text
-        self.translated_text = QTextEdit()
-        self.translated_text.setReadOnly(True)
-        self.translated_text.setPlaceholderText("Translated text will appear here")
-        
-        # Text display for page structure
-        self.structure_text = QTextEdit()
-        self.structure_text.setReadOnly(True)
-        self.structure_text.setPlaceholderText("Page structure analysis will appear here")
-        
-        # Create a splitter for the text widgets to allow user resizing
-        text_splitter = QSplitter(Qt.Vertical)
-        
-        # Create containers for the text widgets
-        original_container = QWidget()
-        original_layout = QVBoxLayout(original_container)
-        original_layout.addWidget(QLabel("Original Text:"))
-        original_layout.addWidget(self.original_text)
-        
-        translated_container = QWidget()
-        translated_layout = QVBoxLayout(translated_container)
-        translated_layout.addWidget(QLabel("Translated Text:"))
-        translated_layout.addWidget(self.translated_text)
-        
-        structure_container = QWidget()
-        structure_layout = QVBoxLayout(structure_container)
-        structure_layout.addWidget(QLabel("Page Structure:"))
-        structure_layout.addWidget(self.structure_text)
-        
-        # Add containers to the splitter
-        text_splitter.addWidget(original_container)
-        text_splitter.addWidget(translated_container)
-        text_splitter.addWidget(structure_container)
-        
-        # Set the initial sizes - 1:2:1 ratio (25% original, 50% translated, 25% structure)
-        text_splitter.setSizes([200, 400, 200])
-        
-        # Add the splitter to the right layout
-        right_layout.addWidget(text_splitter)
-        
-        # Add widgets to main splitter
-        self.splitter.addWidget(self.left_widget)
-        self.splitter.addWidget(self.right_widget)
-        self.splitter.setSizes([600, 600])  # Equal initial sizes
-        
-        # Add everything to main layout
-        main_layout.addLayout(top_btn_layout)
-        #main_layout.addLayout(session_layout)
-        top_btn_layout.addLayout(translation_options_layout)
-        main_layout.addWidget(self.splitter)
-        main_layout.addLayout(status_layout)
-        
-        # Set up auto-save timer
-        self.auto_save_timer = QTimer()
-        self.auto_save_timer.timeout.connect(self.auto_save_session)
-        self.auto_save_timer.start(300000)  # Auto-save every 5 minutes (300,000 ms)
-        
-        # Add show/hide bounding boxes checkbox
-        self.show_boxes_checkbox = QCheckBox("Show Bounding Boxes")
-        self.show_boxes_checkbox.setChecked(True)
-        self.show_boxes_checkbox.stateChanged.connect(self.pdf_display.toggle_bounding_boxes)
-        
-        # Add the checkbox to the button layout
-        top_btn_layout.addWidget(self.show_boxes_checkbox)
-
-    def on_view_tab_changed(self, index):
-        """Handle tab change between original and translated views"""
-        try:
-            if index == 1:  # Translated view
-                # Update the translated page display
-                if self.current_page in self.document_data['page_structures']:
-                    structure = self.document_data['page_structures'][self.current_page]
-                    current_language = self.output_language_combo.currentText()
-                    cache_key = f"{self.current_page}_{current_language}"
-                    
-                    if cache_key in self.document_data['translations']:
-                        translation = self.document_data['translations'][cache_key]
-                        self.translated_display.set_page(self.current_page, structure, translation)
-                    else:
-                        self.status_label.showMessage("No translation available for this page", 3000)
-            else:  # Original view
-                # Update the original page display
-                self.update_page_display()
-                
-        except Exception as e:
-            logger.error(f"Error in on_view_tab_changed: {str(e)}")
-            logger.error("Full error details:", exc_info=True)
-            self.status_label.showMessage(f"Error changing view: {str(e)}", 3000)
-        
-    def open_pdf(self):
-        file_path, _ = QFileDialog.getOpenFileName(self, "Open PDF", "", "PDF Files (*.pdf)")
-        
-        if file_path:
-            # Store the current PDF path
-            self.current_pdf_path = file_path
-            self.current_file = os.path.abspath(file_path)
-            
-            # Log the file opening
-            logger.info(f"Opening PDF: {os.path.basename(file_path)}")
-            
-            # Clean up any running threads before opening new document
-            self.cleanup_threads()
-            
-            # Ensure normal cursor at the start
-            self.ensure_normal_cursor()
-            
-            # Close previous document if one is open
-            if self.doc:
-                self.doc.close()
-                
-            # Reset the progress bar immediately
-            self.translation_progress.clear()
-                
-            # Open new document
-            self.doc = fitz.open(file_path)
-            self.current_page = 0
-            
-            # Update page total label
-            self.page_total.setText(f"/ {len(self.doc)}")
-            
-            # Clear translation cache when opening a new document
-            self.document_data['translations'] = {}
-            
-            # Reset detected language when opening a new PDF
-            self.detected_language = None
-            
-            # Update UI
-            self.update_page_display()  # This will update the PDF display and text areas
-            self.update_buttons()  # This will properly set the previous button state
-            
-            # Enable buttons
-            self.translate_btn.setEnabled(True)
-            self.analyze_btn.setEnabled(True)
-            self.translate_all_btn.setEnabled(True)  # Enable the Translate All button
-            self.export_btn.setEnabled(True)  # Enable the Export button
-            self.save_session_btn.setEnabled(True)  # Enable the Save Session button
-            
-            # Check for existing session and ask if user wants to load it
-            pdf_filename = os.path.basename(file_path)
-            session_file = os.path.join('sessions', f'{os.path.splitext(pdf_filename)[0]}_session.json')
-            
-            if os.path.exists(session_file):
-                reply = QMessageBox.question(self, 'Load Session', 
-                    f'Found existing session for {pdf_filename}. Do you want to load it?',
-                    QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
-                
-                if reply == QMessageBox.Yes:
-                    self.load_session(session_file)
-                else:
-                    # Initialize text areas with current page content
-                    self.extract_text()  # This will update the original text area
-                    current_language = self.output_language_combo.currentText()
-                    self.translated_text.setText("Select 'Translate' to translate to " + current_language)
-                    self.structure_text.setText("Select 'Analyze' to analyze page structure")
-            else:
-                # Initialize text areas with current page content
-                self.extract_text()  # This will update the original text area
-                current_language = self.output_language_combo.currentText()
-                self.translated_text.setText("Select 'Translate' to translate to " + current_language)
-                self.structure_text.setText("Select 'Analyze' to analyze page structure")
-    
     def update_page_display(self):
         """Update the PDF display and text areas with the current page content"""
         try:
@@ -1153,7 +1071,7 @@ class PDFViewer(QMainWindow):
             self.extract_text()
             
             # Check for cached translation
-            current_language = self.output_language_combo.currentText()
+            current_language = self.get_output_language_name()
             translation = self.get_translation(self.current_page, current_language)
             
             if translation:
@@ -1161,58 +1079,35 @@ class PDFViewer(QMainWindow):
                 self.display_translation(translation)
             else:
                 self.translated_text.clear()
+                self.translated_text.setText("Select 'Translate' to translate to " + current_language)
             
             # Update structure text if available
             structure = self.get_page_structure(self.current_page)
             if structure:
-                if isinstance(structure, dict):
-                    # Format the structure data for display
-                    structure_text = []
-                    if 'structure' in structure:
-                        structure_data = structure['structure']
-                        if 'elements' in structure_data:
-                            for element in structure_data['elements']:
-                                category = element.get('category', 'unknown')
-                                content = element.get('content', {})
-                                html = content.get('html', '')
-                                # Extract text from HTML if available
-                                if html:
-                                    # Remove HTML tags and convert to plain text
-                                    import re
-                                    text = re.sub(r'<[^>]+>', '', html)
-                                    structure_text.append(f"{category.upper()}: {text}")
-                                else:
-                                    structure_text.append(f"{category.upper()}: No content")
-                    self.structure_text.setText('\n\n'.join(structure_text))
-                else:
-                    self.structure_text.setText(str(structure))
+                # Display structure in the structure text area
+                self.show_page_structure(structure)
             else:
-                self.structure_text.clear()
+                self.structure_text.setText("Select 'Analyze' to analyze page structure")
             
-            # Update buttons state
+            # Also update the translated page display if in that view
+            if self.view_tabs.currentIndex() == 1:  # Translated view tab
+                if structure and translation:
+                    self.translated_display.set_page(self.current_page, structure, translation)
+            
+            # Update button states
             self.update_buttons()
             
-            # Update progress bar
-            self.refresh_progress_bar()
-            
-            # Force update of PDF display to show bounding boxes if structure exists
-            if self.current_page in self.document_data['page_structures']:
-                structure = self.document_data['page_structures'][self.current_page]
-                logger.debug(f"Setting page structure for page {self.current_page}: {structure}")
-                if isinstance(structure, dict) and 'structure' in structure:
-                    # Enable bounding boxes if structure exists
-                    self.pdf_display.show_bounding_boxes = True
-                    self.show_boxes_checkbox.setChecked(True)
-                    self.pdf_display.set_page_structure(self.current_page, structure)
-                    self.pdf_display.update()  # Force repaint
-                    # Show the page structure in the structure text area
-                    self.show_page_structure(structure['structure'])
-                else:
-                    logger.warning(f"Invalid structure format for page {self.current_page}: {structure}")
-            else:
-                logger.info(f"No page structure found for page {self.current_page}")
-            
-            # Ensure the translation is visible in the text edit
+            # Check if we should auto-translate
+            if self.is_auto_translate_enabled() and not self.get_translation(self.current_page, current_language):
+                logger.debug("Auto-translate is enabled, translating page...")
+                self.translate_text(False)  # Don't force new translation
+                
+            # Check if we should pre-translate next page
+            if self.is_look_ahead_enabled() and self.current_page < len(self.doc) - 1:
+                logger.debug("Look-ahead translation is enabled, checking next page...")
+                self.start_look_ahead_translation()
+                
+            # Ensure translated text is visible if it exists
             if translation:
                 self.translated_text.setVisible(True)
                 self.translated_text.raise_()
@@ -1220,7 +1115,7 @@ class PDFViewer(QMainWindow):
         except Exception as e:
             logger.error(f"Error updating page display: {str(e)}")
             logger.error("Full error details:", exc_info=True)
-            self.status_label.showMessage(f"Error updating page: {str(e)}", 3000)
+            self.status_label.showMessage(f"Error updating display: {str(e)}", 3000)
     
     def update_buttons(self):
         if not self.doc:
@@ -1246,11 +1141,13 @@ class PDFViewer(QMainWindow):
             logger.debug(f"Available structures: {list(self.document_data['page_structures'].keys())}")
             
             # Only translate if auto-translate is enabled
-            if self.auto_translate_checkbox.isChecked():
+            #if self.auto_translate_checkbox.isChecked():
+            if self.is_auto_translate_enabled():
                 self.translate_text()
                 
             # Only do look-ahead if both auto-translate and look-ahead are enabled
-            if self.look_ahead_checkbox.isChecked():
+            #if self.look_ahead_checkbox.isChecked():
+            if self.is_look_ahead_enabled():
                 self.start_look_ahead_translation()
     
     def prev_page(self):
@@ -1265,11 +1162,12 @@ class PDFViewer(QMainWindow):
             logger.debug(f"Available structures: {list(self.document_data['page_structures'].keys())}")
 
             # Only translate if auto-translate is enabled
-            if self.auto_translate_checkbox.isChecked():
+            #if self.auto_translate_checkbox.isChecked():
+            if self.is_auto_translate_enabled():
                 self.translate_text()
                 
             # Only do look-ahead if both auto-translate and look-ahead are enabled
-            if self.look_ahead_checkbox.isChecked():
+            if self.is_look_ahead_enabled():
                 self.start_look_ahead_translation()
 
     def extract_text(self):
@@ -1296,7 +1194,7 @@ class PDFViewer(QMainWindow):
         self.original_text.setText(self.extracted_text)
         
         # Auto-detect language if set to auto-detect and we have text
-        if self.input_language_combo.currentData() == "auto" and text.strip():
+        if self.get_input_language() == "auto" and text.strip():
             if not hasattr(self, 'detected_language') or self.detected_language is None:
                 # Show status message
                 self.status_label.showMessage("Detecting language...")
@@ -1304,12 +1202,6 @@ class PDFViewer(QMainWindow):
                 
                 # Detect language
                 self.detected_language = self.detect_language(text)
-                
-                # Update input language combo box
-                for i in range(self.input_language_combo.count()):
-                    if self.input_language_combo.itemData(i) == self.detected_language:
-                        self.input_language_combo.setCurrentIndex(i)
-                        break
                 
                 # Clear status message
                 self.status_label.showMessage(f"Detected language: {self.detected_language}", 3000)
@@ -1369,7 +1261,8 @@ class PDFViewer(QMainWindow):
     def check_translation_cache(self):
         """Check if translation exists in cache for current page and language"""
         try:
-            current_language = self.output_language_combo.currentText()
+            #current_language = self.output_language_combo.currentText()
+            current_language = self.get_output_language_name()
             cache_key = f"{self.current_page}_{current_language}"
             
             if not hasattr(self, 'document_data'):
@@ -1383,71 +1276,100 @@ class PDFViewer(QMainWindow):
             return None
     
     def start_look_ahead_translation(self):
-        """Start background translation of the next page if it exists and isn't translated yet"""
-        # Check if we have an API key before proceeding
-        if not os.getenv('OPENAI_API_KEY'):
-            # No API key available, don't attempt look-ahead translation
-            return
-        
-        # Only look ahead if we have a document and there's a next page
-        if not self.doc or self.current_page >= len(self.doc) - 1:
-            return
-        
-        next_page_num = self.current_page + 1
-        language_name = self.output_language_combo.currentText()
-        cache_key = (next_page_num, language_name)
-        
-        # Check if next page is already translated
-        if cache_key in self.document_data['translations']:
-            return  # Already translated, nothing to do
-        
-        # Check if this translation is already in progress
-        for worker in self.active_workers:
-            if worker.page_num == next_page_num and worker.output_language_name == language_name:
-                return  # Translation already in progress
-        
-        # Get text from next page
-        next_page = self.doc.load_page(next_page_num)
-        next_page_text = next_page.get_text()
-        
-        # Check if there's any text to translate
-        if not next_page_text or next_page_text.strip() == "":
-            return  # No text to translate
-        
-        # Get input and output languages
-        input_lang_code = self.input_language_combo.currentData()
-        if input_lang_code == "auto" and hasattr(self, 'detected_language') and self.detected_language:
-            input_lang_code = self.detected_language
-        
-        output_lang_name = self.output_language_combo.currentText()
-        output_lang_code = self.output_language_combo.currentData()
-        
-        # Mark the next page as translating in the progress bar
-        self.translation_progress.mark_page_translating(next_page_num)
-        
-        # Create and start worker thread for translation
-        self.look_ahead_worker = TranslationWorker(
-            next_page_text, 
-            next_page_num,
-            input_lang_code,
-            output_lang_code,
-            output_lang_name,
-            self.model_combo.currentData()
-        )
-        self.look_ahead_worker.translationComplete.connect(self.on_translation_complete)
-        
-        # Add to active workers list
-        self.active_workers.append(self.look_ahead_worker)
-        
-        # Connect finished signal to remove from active workers
-        self.look_ahead_worker.finished.connect(
-            lambda: self.active_workers.remove(self.look_ahead_worker) if self.look_ahead_worker in self.active_workers else None
-        )
-        
-        self.look_ahead_worker.start()
-        
-        # Add a small status indicator that look-ahead translation is in progress
-        self.status_label.showMessage("Pre-translating next page...")
+        """Start background translation of the next page"""
+        try:
+            # Check if we already have a look-ahead worker running
+            if hasattr(self, 'look_ahead_worker') and self.look_ahead_worker and self.look_ahead_worker.isRunning():
+                # Worker is still running, don't start another one
+                logger.debug("Look-ahead translation already in progress")
+                return
+                
+            # Calculate the next page number
+            next_page = self.current_page + 1
+            if next_page >= len(self.doc):
+                # No next page
+                return
+                
+            # Get language settings from preferences
+            input_lang_code = self.get_input_language()
+            output_lang_code = self.get_output_language()
+            output_lang_name = self.get_output_language_name()
+            
+            # Create cache key for this translation
+            cache_key = (next_page, output_lang_name)
+            
+            # Check if we already have a translation for this page
+            if cache_key in self.document_data['translations']:
+                # Translation already exists
+                logger.debug(f"Translation for next page {next_page} already exists")
+                return
+                
+            # Check if the next page has a structure
+            if next_page not in self.document_data['page_structures']:
+                # No structure for the next page, analyze it first
+                logger.debug(f"No structure found for next page {next_page}, analyzing...")
+                
+                # Create a worker to analyze the next page
+                page = self.doc.load_page(next_page)
+                pixmap = page.get_pixmap(matrix=fitz.Matrix(2, 2))
+                
+                # TODO: Implement analysis worker
+                # For now, just skip look-ahead translation if no structure
+                logger.debug(f"Skipping look-ahead translation for page {next_page} due to missing structure")
+                return
+                
+            # Get the structure for the next page
+            structure = self.document_data['page_structures'][next_page]
+            if not isinstance(structure, dict) or 'structure' not in structure:
+                logger.warning(f"Invalid structure format for next page {next_page}")
+                return
+                
+            structure_data = structure['structure']
+            if 'elements' not in structure_data:
+                logger.warning(f"No elements found in structure for next page {next_page}")
+                return
+                
+            # Prepare structured text for translation
+            structured_text = []
+            for element in structure_data['elements']:
+                category = element.get('category', 'unknown')
+                content = element.get('content', {})
+                html = content.get('html', '')
+                if html:
+                    # Remove HTML tags and convert to plain text
+                    text = re.sub(r'<[^>]+>', '', html)
+                    if text.strip():  # Only add if there's actual text
+                        structured_text.append(f"[{category}]\n{text}")
+                    
+            if not structured_text:
+                logger.warning(f"No text found in structure elements for next page {next_page}")
+                return
+                
+            text_to_translate = "\n\n".join(structured_text)
+            
+            # Get the selected model from preferences
+            model = self.get_model()
+            
+            # Create a worker to translate the next page
+            self.look_ahead_worker = TranslationWorker(
+                text_to_translate,
+                next_page,
+                input_lang_code,
+                output_lang_code,
+                output_lang_name,
+                model
+            )
+            
+            # Connect signals
+            self.look_ahead_worker.translationComplete.connect(self.on_translation_complete)
+            
+            # Start the worker
+            logger.debug(f"Starting look-ahead translation for page {next_page}")
+            self.look_ahead_worker.start()
+            
+        except Exception as e:
+            logger.error(f"Error in look-ahead translation: {str(e)}")
+            logger.error("Full error details:", exc_info=True)
     
     def on_translation_complete(self, translated_text, page_num, language_name):
         """Handle completed translation and store in structured format"""
@@ -1472,7 +1394,7 @@ class PDFViewer(QMainWindow):
                 
             # Create translation object with timestamp
             translation = {
-                "timestamp": datetime.now().isoformat(),
+                "timestamp": datetime.datetime.now().isoformat(),
                 "structure": {
                     "elements": []
                 }
@@ -1604,7 +1526,7 @@ class PDFViewer(QMainWindow):
                     
                     # Store the analysis result in document_data
                     self.document_data['page_structures'][self.current_page] = {
-                        'timestamp': datetime.now().isoformat(),
+                        'timestamp': datetime.datetime.now().isoformat(),
                         'structure': result
                     }
                     
@@ -1802,10 +1724,10 @@ class PDFViewer(QMainWindow):
                 logger.warning(f"No elements found in structure for page {self.current_page}")
                 return
             
-            # Get the selected languages
-            input_lang_code = self.input_language_combo.currentData()
-            output_lang_code = self.output_language_combo.currentData()
-            output_lang_name = self.output_language_combo.currentText()
+            # Get language settings from preferences
+            input_lang_code = self.get_input_language()
+            output_lang_code = self.get_output_language()
+            output_lang_name = self.get_output_language_name()
             
             # Create cache key
             cache_key = (self.current_page, output_lang_name)
@@ -1815,14 +1737,14 @@ class PDFViewer(QMainWindow):
                 logger.info(f"Using cached translation for page {self.current_page}")
                 self.display_translation(self.document_data['translations'][cache_key])
                 return
-            
+                
             # Check API key
             if not os.getenv('OPENAI_API_KEY'):
                 if not self.request_api_key():
                     return
-                
-            # Get the selected model
-            model = self.model_combo.currentData()
+                    
+            # Get the selected model from preferences
+            model = self.get_model()
             
             # Prepare structured text for translation
             structured_text = []
@@ -1867,7 +1789,7 @@ class PDFViewer(QMainWindow):
                 # Call OpenAI API directly
                 if is_new_version:
                     response = openai.chat.completions.create(
-                            model=model,
+                        model=model,
                         messages=messages,
                         temperature=0.2,
                         max_tokens=2000
@@ -1875,14 +1797,14 @@ class PDFViewer(QMainWindow):
                     translated = response.choices[0].message.content.strip()
                 else:
                     response = openai.ChatCompletion.create(
-                            model=model,
+                        model=model,
                         messages=messages,
                         temperature=0.2,
                         max_tokens=2000
                     )
                     translated = response.choices[0].message['content'].strip()
                 logger.debug(f"Translated text: {translated}")
-            
+                
                 # Process the translation
                 self.on_translation_complete(translated, self.current_page, output_lang_name)
                 
@@ -2077,7 +1999,8 @@ class PDFViewer(QMainWindow):
             self.update_page_display()
             
             # Ensure translation is still displayed
-            current_language = self.output_language_combo.currentText()
+            #current_language = self.output_language_combo.currentText()
+            current_language = self.get_output_language_name()
             translation = self.get_translation(self.current_page, current_language)
             if translation:
                 self.display_translation(translation)
@@ -2298,17 +2221,17 @@ class PDFViewer(QMainWindow):
         if not self.doc:
             return
         
-        # Get input and output languages
-        input_lang_code = self.input_language_combo.currentData()
-        input_lang_name = self.input_language_combo.currentText()
+        # Get input and output languages from preferences
+        input_lang_code = self.get_input_language()
+        input_lang_name = self.get_input_language_name()
         
         # If auto-detect, we'll need to detect for each page, but use English as fallback
         if input_lang_code == "auto":
             input_lang_code = "en"
         
-        output_lang_name = self.output_language_combo.currentText()
-        output_lang_code = self.output_language_combo.currentData()
-        model = self.model_combo.currentData()
+        output_lang_name = self.get_output_language_name()
+        output_lang_code = self.get_output_language()
+        model = self.get_model()
         
         # Translate the current page if not already in cache
         current_cache_key = (self.current_page, output_lang_name)
@@ -2317,51 +2240,42 @@ class PDFViewer(QMainWindow):
         
         # Start background translation for all other pages
         pending_pages = []
-        for page_num in range(len(self.doc)):
-            # Skip current page as it's already being translated
-            if page_num == self.current_page:
-                continue
-            
-            # Skip pages that are already translated
-            cache_key = (page_num, output_lang_name)
-            if cache_key in self.document_data['translations']:
-                continue
-            
-            # Check if this page is already being translated
-            is_in_progress = False
-            for worker in self.active_workers:
-                if worker.page_num == page_num and worker.output_language_name == output_lang_name:
-                    is_in_progress = True
-                    break
-                
-            if is_in_progress:
-                continue
-            
-            # Add page to list of pending pages
-            pending_pages.append(page_num)
         
-        # If we have pending pages, start translating them
+        # Translate pages in reverse order except current page
+        for i in range(len(self.doc) - 1, -1, -1):
+            if i == self.current_page:
+                continue  # Skip current page as it's already done
+                
+            cache_key = (i, output_lang_name)
+            if cache_key not in self.document_data['translations']:
+                pending_pages.append(i)
+        
         if pending_pages:
-            # Update status to show we're starting bulk translation
-            self.status_label.showMessage(f"Starting translation of {len(pending_pages)} pages...", 3000)
+            # Confirm with user
+            token_estimate = self.estimate_document_tokens()
+            cost_estimate = self.estimate_translation_cost(token_estimate)
             
-            # Start translation for each page, but limit to first 3 to avoid overwhelming API
-            for page_num in pending_pages[:min(3, len(pending_pages))]:
-                self.start_page_translation(page_num, input_lang_code, output_lang_code, output_lang_name, model)
+            dialog = TranslateAllDialog(self, len(pending_pages), token_estimate, cost_estimate)
+            if dialog.exec_() != QDialog.Accepted:
+                return
             
-            # If a timer already exists, stop it first
-            if hasattr(self, 'bulk_translation_timer') and self.bulk_translation_timer is not None:
-                self.bulk_translation_timer.stop()
+            # Process first batch of pages
+            logger.info(f"Starting translation of {len(pending_pages)} pages")
+            self.status_label.showMessage(f"Translating document ({len(pending_pages)} pages)...")
             
-            # Create a new timer to check progress and start new translations as workers finish
-            self.bulk_translation_timer = QTimer()
-            self.bulk_translation_timer.timeout.connect(lambda: self.check_bulk_translation_progress(
-                pending_pages, input_lang_code, output_lang_code, output_lang_name, model
-            ))
-            self.bulk_translation_timer.start(1000)  # Check every second
-        else:
-            # All pages are either translated or in progress
-            self.status_label.showMessage("All pages are either translated or currently being translated.", 3000)
+            # Translate remaining pages in batches to avoid overloading
+            if pending_pages:
+                # Start with a small batch of pages
+                batch_size = min(5, len(pending_pages))
+                current_batch = pending_pages[:batch_size]
+                pending_pages = pending_pages[batch_size:]
+                
+                # Process current batch
+                for page_num in current_batch:
+                    self.start_page_translation(page_num, input_lang_code, output_lang_code, output_lang_name, model)
+                
+                # Schedule checking for progress
+                QTimer.singleShot(5000, lambda: self.check_bulk_translation_progress(pending_pages, input_lang_code, output_lang_code, output_lang_name, model))
 
     def start_page_translation(self, page_num, input_lang_code, output_lang_code, output_lang_name, model):
         """Start translation for a specific page"""
@@ -2454,10 +2368,13 @@ class PDFViewer(QMainWindow):
             for page_num in remaining_pages[:can_start]:
                 self.start_page_translation(page_num, input_lang_code, output_lang_code, output_lang_name, model)
 
-    def on_output_language_changed(self, language_name):
+    def on_output_language_changed(self):
         """Handle output language selection change"""
         if not self.doc:
             return
+        
+        # Get the current output language from settings
+        language_name = self.get_output_language_name()
         
         # Refresh the progress bar based on the new language
         self.refresh_progress_bar()
@@ -2482,7 +2399,7 @@ class PDFViewer(QMainWindow):
         self.translation_progress.set_current_page(self.current_page)
         
         # Mark translated pages for the current language
-        current_language = self.output_language_combo.currentText()
+        current_language = self.get_output_language_name()
         for i in range(len(self.doc)):
             if (i, current_language) in self.document_data['translations']:
                 self.translation_progress.mark_page_translated(i)
@@ -2494,7 +2411,8 @@ class PDFViewer(QMainWindow):
             return
         
         # Check if we have any translations in the cache
-        current_language = self.output_language_combo.currentText()
+        #current_language = self.output_language_combo.currentText()
+        current_language = self.get_output_language_name()
         has_translations = False
         for key in self.document_data['translations']:
             if key[1] == current_language:
@@ -2557,7 +2475,8 @@ class PDFViewer(QMainWindow):
             QApplication.processEvents()  # Update UI immediately
             
             # Get current language
-            current_language = self.output_language_combo.currentText()
+            #current_language = self.output_language_combo.currentText()
+            current_language = self.get_output_language_name()
             
             # Calculate how many pages are translated and get their numbers
             translated_pages = 0
@@ -2615,32 +2534,29 @@ class PDFViewer(QMainWindow):
             self.status_label.showMessage(f"Export failed: {str(e)}", 5000)
 
     def export_as_pdf(self):
-        """Export the translated document as a PDF file with page structure preserved"""
-        # Log export attempt
-        logger.info("PDF export initiated")
-        
-        # Show file save dialog for the PDF file
-        file_path, _ = QFileDialog.getSaveFileName(
-            self, 
-            "Export Translation as PDF", 
-            "", 
-            "PDF Files (*.pdf)"
-        )
-        
-        if not file_path:
-            return  # User canceled
-        
-        # Add .pdf extension if not already present
-        if not file_path.lower().endswith('.pdf'):
-            file_path += '.pdf'
-        
+        """Export the translated document as a PDF file"""
         try:
+            if not self.doc:
+                return
+                
+            # Create output PDF file path
+            pdf_filename = os.path.basename(self.current_file)
+            base_name = os.path.splitext(pdf_filename)[0]
+            current_language = self.get_output_language_name()
+            sanitized_language = current_language.replace(" ", "_").lower()
+            output_path, _ = QFileDialog.getSaveFileName(
+                self, 
+                "Save Translated PDF", 
+                f"{base_name}_{sanitized_language}.pdf", 
+                "PDF Files (*.pdf)"
+            )
+            
+            if not output_path:
+                return
+                
             # Show progress message
             self.status_label.showMessage(f"Exporting translations to PDF...")
             QApplication.processEvents()  # Update UI immediately
-            
-            # Get current language
-            current_language = self.output_language_combo.currentText()
             
             # Use PyMuPDF (fitz) for PDF creation which has better Unicode support
             doc = fitz.open()  # Create a new empty PDF
@@ -2652,7 +2568,8 @@ class PDFViewer(QMainWindow):
             translated_pages = 0
             translated_page_numbers = []
             for i in range(len(self.doc)):
-                if (i, current_language) in self.document_data['translations']:
+                cache_key = (i, current_language)
+                if cache_key in self.document_data['translations']:
                     translated_pages += 1
                     translated_page_numbers.append(i + 1)  # Store 1-based page numbers
             
@@ -2663,7 +2580,7 @@ class PDFViewer(QMainWindow):
             Total Document Pages: {len(self.doc)}
             Translated Pages: {translated_pages}
             Date: {time.strftime('%Y-%m-%d %H:%M:%S')}
-            Translated using: {self.model_combo.currentText()}
+            Translated using: {self.get_model_name()}
 
             Included pages: {', '.join(map(str, translated_page_numbers))}
             """
@@ -2678,74 +2595,85 @@ class PDFViewer(QMainWindow):
             # Add horizontal line
             page.draw_line((72, 200), (page.rect.width - 72, 200))
             
-            # For each page in the document
-            for i in range(len(self.doc)):
-                # Skip pages that haven't been translated
-                cache_key = (i, current_language)
+            # Create a font for text
+            font_size = 10
+            
+            # Process each page
+            for orig_page_num in range(len(self.doc)):
+                cache_key = (orig_page_num, current_language)
+                
+                # Check if we have a translation for this page
                 if cache_key not in self.document_data['translations']:
                     continue
                 
                 # Get the translated content
-                content = self.document_data['translations'][cache_key]
+                translation = self.document_data['translations'][cache_key]
                 
-                # Create a new page for this translated content
-                page = doc.new_page()
+                # Create a new page in the output PDF
+                output_page = doc.new_page()
                 
-                # Add page header
-                page.insert_text((72, 72), f"Original Page {i+1}", fontsize=14)
+                # Set page header with original page number
+                header_text = f"Original Page: {orig_page_num + 1} - Language: {current_language}"
+                output_page.insert_text((72, 36), header_text, fontsize=8)
                 
-                # Add horizontal line
-                page.draw_line((72, 100), (page.rect.width - 72, 100))
+                # Draw a line under the header
+                output_page.draw_line((72, 48), (output_page.rect.width - 72, 48))
                 
-                # Create a rectangle for the text area with proper margins
-                # Left: 72 points (1 inch), Right: 72 points from page edge
-                # Top: 120 points, Bottom: 72 points from page edge
-                text_rect = fitz.Rect(72, 120, page.rect.width - 72, page.rect.height - 72)
+                # Start position for content
+                y_pos = 72
                 
-                try:
-                    # Try to use malgunGothic for better CJK support if available
-                    font_path = "C:/Windows/Fonts/malgun.ttf"
-                    fontname = page.insert_font(fontname="MalgunGothic", fontfile=font_path)
-                    page.insert_textbox(
-                        text_rect,
-                        content,
-                        fontname="MalgunGothic",
-                        fontsize=11,
-                        align=0
-                    )
-                except Exception as font_error:
-                    # Fall back to default font if NanumGothic is not available
-                    page.insert_textbox(
-                        text_rect,
-                        content,
-                        fontsize=11,
-                        align=0
-                    )
+                # Helper function to add formatted text
+                def add_text(text, y, fontsize=10, is_heading=False):
+                    # Calculate text width and wrap if needed
+                    rect = fitz.Rect(72, y, output_page.rect.width - 72, y + 1000)
+                    text_options = {"fontsize": fontsize}
+                    if is_heading:
+                        text_options["fontweight"] = "bold"
+                    
+                    # Insert text with wrapping
+                    inserted_text = output_page.insert_textbox(rect, text, **text_options)
+                    
+                    # Return the new y position after the text
+                    return y + inserted_text + 10  # Add a small spacing after each paragraph
+                
+                # Add translated content based on structure
+                if isinstance(translation, dict) and 'structure' in translation:
+                    # Process structured translation
+                    for element in translation['structure']['elements']:
+                        category = element.get('category', 'unknown')
+                        content = element.get('content', {})
+                        text = content.get('text', '')
+                        
+                        if text:
+                            # Add category heading if it's meaningful
+                            if category.lower() not in ['unknown', 'other']:
+                                y_pos = add_text(f"{category.upper()}", y_pos, fontsize=12, is_heading=True)
+                            
+                            # Add the text content
+                            y_pos = add_text(text, y_pos)
+                else:
+                    # Process plain text translation
+                    y_pos = add_text(str(translation), y_pos)
             
-            # Save the PDF
-            doc.save(file_path)
+            # Save the document
+            doc.save(output_path)
             doc.close()
             
-            # Show success message
-            self.status_label.showMessage(f"PDF export complete: {file_path}", 5000)
+            self.status_label.showMessage(f"Translation exported to {output_path}", 5000)
             
             # Ask if user wants to open the exported file
-            self.open_exported_file(file_path)
+            reply = QMessageBox.question(self, 'Open File', 
+                'Export completed. Do you want to open the file now?',
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
             
-            # Add log at the end of successful export
-            logger.info(f"PDF export completed: {os.path.basename(file_path)}")
-            
+            if reply == QMessageBox.Yes:
+                self.open_exported_file(output_path)
+                
         except Exception as e:
-            # Show error message if export fails
-            error_msg = f"Failed to export PDF: {str(e)}\n\n"
-            error_msg += "Try exporting as text (.txt) instead."
-            
-            QMessageBox.critical(
-                self, 
-                "Export Error", 
-                error_msg
-            )
-            self.status_label.showMessage(f"Export failed: {str(e)}", 5000)
+            logger.error(f"Error exporting PDF: {str(e)}")
+            logger.error("Full error details:", exc_info=True)
+            self.status_label.showMessage(f"Export error: {str(e)}", 3000)
+            QMessageBox.warning(self, "Export Error", f"Failed to export PDF: {str(e)}")
 
     def open_exported_file(self, file_path):
         """Open the exported file with the default system application"""
@@ -2796,11 +2724,13 @@ class PDFViewer(QMainWindow):
             self.update_buttons()
             
             # Only translate if auto-translate is enabled
-            if self.auto_translate_checkbox.isChecked():
+            #if self.auto_translate_checkbox.isChecked():
+            if self.is_auto_translate_enabled():
                 self.translate_text()
                 
             # Only do look-ahead if both auto-translate and look-ahead are enabled
-            if self.look_ahead_checkbox.isChecked():
+            #if self.look_ahead_checkbox.isChecked():
+            if self.is_look_ahead_enabled():
                 self.start_look_ahead_translation()
                 
         except Exception as e:
@@ -2818,6 +2748,103 @@ class PDFViewer(QMainWindow):
         
         # Log the level change
         logger.info(f"Logging level changed to: {level_name}")
+
+    def open_pdf(self):
+        file_path, _ = QFileDialog.getOpenFileName(self, "Open PDF", "", "PDF Files (*.pdf)")
+        
+        if file_path:
+            # Store the current PDF path
+            self.current_pdf_path = file_path
+            self.current_file = os.path.abspath(file_path)
+            
+            # Log the file opening
+            logger.info(f"Opening PDF: {os.path.basename(file_path)}")
+            
+            # Clean up any running threads before opening new document
+            self.cleanup_threads()
+            
+            # Ensure normal cursor at the start
+            self.ensure_normal_cursor()
+            
+            # Close previous document if one is open
+            if self.doc:
+                self.doc.close()
+                
+            # Reset the progress bar immediately
+            self.translation_progress.clear()
+                
+            # Open new document
+            self.doc = fitz.open(file_path)
+            self.current_page = 0
+            
+            # Update page total label
+            self.page_total.setText(f"/ {len(self.doc)}")
+            
+            # Clear translation cache when opening a new document
+            self.document_data['translations'] = {}
+            
+            # Reset detected language when opening a new PDF
+            self.detected_language = None
+            
+            # Update UI
+            self.update_page_display()  # This will update the PDF display and text areas
+            self.update_buttons()  # This will properly set the previous button state
+            
+            # Enable buttons
+            self.translate_btn.setEnabled(True)
+            self.analyze_btn.setEnabled(True)
+            self.translate_all_btn.setEnabled(True)  # Enable the Translate All button
+            self.export_btn.setEnabled(True)  # Enable the Export button
+            self.save_session_btn.setEnabled(True)  # Enable the Save Session button
+            
+            # Check for existing session and ask if user wants to load it
+            pdf_filename = os.path.basename(file_path)
+            # get directory of file
+            self.pdf_directory = os.path.dirname(file_path)
+
+            session_file = os.path.join(self.pdf_directory, f'{os.path.splitext(pdf_filename)[0]}.json')
+            
+            if os.path.exists(session_file):
+                reply = QMessageBox.Yes
+                #reply = QMessageBox.question(self, 'Load Session', 
+                #    f'Found existing session for {pdf_filename}. Do you want to load it?',
+                #    QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+                
+                if reply == QMessageBox.Yes:
+                    self.load_session(session_file)
+                else:
+                    # Initialize text areas with current page content
+                    self.extract_text()  # This will update the original text area
+                    current_language = self.get_output_language_name()
+                    self.translated_text.setText("Select 'Translate' to translate to " + current_language)
+                    self.structure_text.setText("Select 'Analyze' to analyze page structure")
+            else:
+                # Initialize text areas with current page content
+                self.extract_text()  # This will update the original text area
+                current_language = self.get_output_language_name()
+                self.translated_text.setText("Select 'Translate' to translate to " + current_language)
+                self.structure_text.setText("Select 'Analyze' to analyze page structure")
+
+    def on_view_tab_changed(self, index):
+        """Handle tab change between PDF view and translated view"""
+        try:
+            if index == 1:  # Translated view
+                # Update the translated page display
+                if self.current_page in self.document_data['page_structures']:
+                    structure = self.document_data['page_structures'][self.current_page]
+                    current_language = self.get_output_language_name()
+                    cache_key = (self.current_page, current_language)
+                    
+                    if cache_key in self.document_data['translations']:
+                        translation = self.document_data['translations'][cache_key]
+                        self.translated_display.set_page(self.current_page, structure, translation)
+                    else:
+                        self.status_label.showMessage("No translation available for this page", 3000)
+            
+        except Exception as e:
+            logger.error(f"Error in on_view_tab_changed: {str(e)}")
+            logger.error("Full error details:", exc_info=True)
+            self.status_label.showMessage(f"Error changing view: {str(e)}", 3000)
 
 class PDFDisplayWidget(QWidget):
     def __init__(self, parent=None):
@@ -3005,6 +3032,177 @@ class TranslatedPageDisplayWidget(QWidget):
         finally:
             if painter is not None:
                 painter.end()
+
+class PreferencesDialog(QDialog):
+    """Dialog for application preferences"""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Preferences")
+        self.setMinimumWidth(500)
+        self.settings = QSettings("PDFTranslator", "Settings")
+        self.init_ui()
+        self.load_settings()
+        
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+        
+        # Create tabs for different settings categories
+        tabs = QTabWidget()
+        layout.addWidget(tabs)
+        
+        # Translation settings tab
+        translation_tab = QWidget()
+        translation_layout = QVBoxLayout(translation_tab)
+        
+        # Group: Language settings
+        language_group = QGroupBox("Language Settings")
+        language_layout = QFormLayout(language_group)
+        
+        # Input language selection
+        self.input_language_combo = QComboBox()
+        self.input_language_combo.addItem("English", "en")
+        self.input_language_combo.addItem("Auto-detect", "auto")
+        self.input_language_combo.addItem("Spanish", "es")
+        self.input_language_combo.addItem("French", "fr")
+        self.input_language_combo.addItem("German", "de")
+        self.input_language_combo.addItem("Italian", "it")
+        self.input_language_combo.addItem("Portuguese", "pt")
+        self.input_language_combo.addItem("Russian", "ru")
+        self.input_language_combo.addItem("Japanese", "ja")
+        self.input_language_combo.addItem("Korean", "ko")
+        self.input_language_combo.addItem("Chinese", "zh")
+        language_layout.addRow("Input Language:", self.input_language_combo)
+        
+        # Output language selection
+        self.output_language_combo = QComboBox()
+        self.output_language_combo.addItem("Korean", "ko")
+        self.output_language_combo.addItem("Japanese", "ja")
+        self.output_language_combo.addItem("Chinese", "zh")
+        self.output_language_combo.addItem("Spanish", "es")
+        self.output_language_combo.addItem("French", "fr")
+        language_layout.addRow("Output Language:", self.output_language_combo)
+        
+        # Model selection
+        self.model_combo = QComboBox()
+        self.model_combo.addItem("GPT-3.5 Turbo", "gpt-3.5-turbo")
+        self.model_combo.addItem("GPT-4 Turbo", "gpt-4-turbo")
+        self.model_combo.addItem("GPT-4o mini", "gpt-4o-mini")
+        language_layout.addRow("Translation Model:", self.model_combo)
+        
+        translation_layout.addWidget(language_group)
+        
+        # Group: Translation options
+        options_group = QGroupBox("Translation Options")
+        options_layout = QVBoxLayout(options_group)
+        
+        # Auto-translate checkbox
+        self.auto_translate_checkbox = QCheckBox("Auto-translate")
+        self.auto_translate_checkbox.setToolTip("Automatically translate when changing pages")
+        options_layout.addWidget(self.auto_translate_checkbox)
+        
+        # Look-ahead translation checkbox
+        self.look_ahead_checkbox = QCheckBox("Look-ahead translation")
+        self.look_ahead_checkbox.setToolTip("Pre-translate next page in background")
+        options_layout.addWidget(self.look_ahead_checkbox)
+        
+        translation_layout.addWidget(options_group)
+        
+        # Add the translation tab
+        tabs.addTab(translation_tab, "Translation")
+        
+        # Debug settings tab
+        debug_tab = QWidget()
+        debug_layout = QVBoxLayout(debug_tab)
+        
+        # Debug level selection
+        debug_group = QGroupBox("Debug Settings")
+        debug_form = QFormLayout(debug_group)
+        
+        self.debug_level_combo = QComboBox()
+        self.debug_level_combo.addItem("Error", logging.ERROR)
+        self.debug_level_combo.addItem("Warning", logging.WARNING)
+        self.debug_level_combo.addItem("Info", logging.INFO)
+        self.debug_level_combo.addItem("Debug", logging.DEBUG)
+        debug_form.addRow("Log Level:", self.debug_level_combo)
+        
+        debug_layout.addWidget(debug_group)
+        
+        # Add the debug tab
+        tabs.addTab(debug_tab, "Debug")
+        
+        # Add dialog buttons
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel | QDialogButtonBox.Apply)
+        button_box.accepted.connect(self.accept)
+        button_box.rejected.connect(self.reject)
+        button_box.button(QDialogButtonBox.Apply).clicked.connect(self.apply_settings)
+        layout.addWidget(button_box)
+        
+    def load_settings(self):
+        """Load settings from QSettings"""
+        # Language settings
+        input_lang = self.settings.value("input_language", "en", str)
+        for i in range(self.input_language_combo.count()):
+            if self.input_language_combo.itemData(i) == input_lang:
+                self.input_language_combo.setCurrentIndex(i)
+                break
+                
+        output_lang = self.settings.value("output_language", "ko", str)
+        for i in range(self.output_language_combo.count()):
+            if self.output_language_combo.itemData(i) == output_lang:
+                self.output_language_combo.setCurrentIndex(i)
+                break
+                
+        # Model setting
+        model = self.settings.value("model", "gpt-4o-mini", str)
+        for i in range(self.model_combo.count()):
+            if self.model_combo.itemData(i) == model:
+                self.model_combo.setCurrentIndex(i)
+                break
+                
+        # Translation options
+        self.auto_translate_checkbox.setChecked(self.settings.value("auto_translate", False, bool))
+        self.look_ahead_checkbox.setChecked(self.settings.value("look_ahead", False, bool))
+        
+        # Debug level
+        debug_level = self.settings.value("debug_level", logging.INFO, int)
+        for i in range(self.debug_level_combo.count()):
+            if self.debug_level_combo.itemData(i) == debug_level:
+                self.debug_level_combo.setCurrentIndex(i)
+                break
+    
+    def save_settings(self):
+        """Save settings to QSettings"""
+        # Language settings
+        self.settings.setValue("input_language", self.input_language_combo.currentData())
+        self.settings.setValue("output_language", self.output_language_combo.currentData())
+        self.settings.setValue("input_language_name", self.input_language_combo.currentText())
+        self.settings.setValue("output_language_name", self.output_language_combo.currentText())
+        
+        # Model setting
+        self.settings.setValue("model", self.model_combo.currentData())
+        self.settings.setValue("model_name", self.model_combo.currentText())
+        
+        # Translation options
+        self.settings.setValue("auto_translate", self.auto_translate_checkbox.isChecked())
+        self.settings.setValue("look_ahead", self.look_ahead_checkbox.isChecked())
+        
+        # Debug level
+        self.settings.setValue("debug_level", self.debug_level_combo.currentData())
+        
+        # Sync settings to disk
+        self.settings.sync()
+    
+    def apply_settings(self):
+        """Apply settings without closing the dialog"""
+        self.save_settings()
+        # Emit signal to notify the main window about changes
+        if hasattr(self.parent(), 'on_settings_changed'):
+            self.parent().on_settings_changed()
+    
+    def accept(self):
+        """Called when OK button is clicked"""
+        self.save_settings()
+        super().accept()
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
