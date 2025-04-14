@@ -153,33 +153,43 @@ class TranslationWorker(QThread):
         self.output_language = output_language
         self.output_language_name = output_language_name
         self.model = model
-        self.is_running = True
+        self._is_running = True
         
     def run(self):
         try:
-            # Check if thread should still be running
-            if not self.is_running:
-                return
+            # Check if the text is structured
+            is_structured = any(tag in self.text for tag in ['<header>', '<heading1>', '<paragraph>', '<footnote>', '<footer>'])
+            
+            if is_structured:
+                # Prepare system message for structured translation
+                messages = [
+                    {
+                        "role": "system",
+                        "content": f"You are a professional translator. Translate the provided text from {self.input_language} to {self.output_language_name} accurately while maintaining the original meaning and context. Preserve the XML-like tags in the output exactly as they appear in the input."
+                    }
+                ]
                 
-            # Check if we have an API key
-            if not os.getenv('OPENAI_API_KEY'):
-                self.translationComplete.emit("Translation error: No API key available", self.page_num, self.output_language_name)
-                return
-            
-            # Prepare the messages for GPT
-            messages = [
-                {"role": "system", "content": f"You are a professional Korean translator. Translate the following {self.input_language} text into fluent and natural {self.output_language_name}. Use appropriate academic tone and accurate terminology."},
-                {"role": "user", "content": f"Translate the following text to {self.output_language_name}:\n\n{self.text}"}
-            ]
-            
-            # Log the API request (truncate text if too long to avoid huge log files)
-            display_text = self.text[:200] + "..." if len(self.text) > 200 else self.text
-            logger.info(f"API Request - Page {self.page_num+1} - {self.input_language} to {self.output_language_name} - Model: {self.model}")
-            logger.debug(f"Full request: {messages}")
+                # Add the text to translate
+                messages.append({
+                    "role": "user",
+                    "content": f"Translate the following structured text to {self.output_language_name}:\n\n{self.text}"
+                })
+            else:
+                # Regular translation
+                messages = [
+                    {
+                        "role": "system",
+                        "content": f"You are a professional translator. Translate the provided text from {self.input_language} to {self.output_language_name} accurately while maintaining the original meaning and context."
+                    }
+                ]
+                
+                messages.append({
+                    "role": "user",
+                    "content": f"Translate the following text to {self.output_language_name}:\n\n{self.text}"
+                })
             
             # Call OpenAI API
             if is_new_version:
-                # For openai >= 1.0.0
                 response = openai.chat.completions.create(
                     model=self.model,
                     messages=messages,
@@ -188,7 +198,6 @@ class TranslationWorker(QThread):
                 )
                 translated = response.choices[0].message.content.strip()
             else:
-                # For openai < 1.0.0 (older versions)
                 response = openai.ChatCompletion.create(
                     model=self.model,
                     messages=messages,
@@ -197,24 +206,16 @@ class TranslationWorker(QThread):
                 )
                 translated = response.choices[0].message['content'].strip()
             
-            # Log the API response (truncate if too long)
-            display_translated = translated[:200] + "..." if len(translated) > 200 else translated
-            logger.info(f"API Response - Page {self.page_num+1} - Success - Length: {len(translated)} chars")
-            logger.debug(f"Full response: {display_translated}")
-            
-            # Emit signal with translation results
+            # Emit the result
             self.translationComplete.emit(translated, self.page_num, self.output_language_name)
             
         except Exception as e:
-            # Log the error
-            logger.error(f"Translation error on page {self.page_num+1}: {str(e)}")
+            logger.error(f"Error in TranslationWorker: {str(e)}")
+            logger.error("Full error details:", exc_info=True)
+            self.translationComplete.emit(f"Translation error: {str(e)}", self.page_num, self.output_language_name)
             
-            if self.is_running:  # Only emit signal if thread hasn't been terminated
-                self.translationComplete.emit(f"Translation error: {str(e)}", self.page_num, self.output_language_name)
-    
     def stop(self):
-        """Signal the thread to stop"""
-        self.is_running = False
+        self._is_running = False
 
 class ApiKeyDialog(QDialog):
     """Dialog to request API key from user"""
@@ -580,41 +581,38 @@ class PDFViewer(QMainWindow):
         """Load session data from a file"""
         try:
             if session_file is None:
-                if not hasattr(self, 'current_file') or not self.current_file:
+                # Use the current file name to find the session file
+                if hasattr(self, 'file_path') and self.file_path.text():
+                    base_name = os.path.splitext(os.path.basename(self.file_path.text()))[0]
+                    session_file = f"sessions/{base_name}_session.json"
+                else:
+                    self.status_label.showMessage("No file loaded", 3000)
                     return
-                    
-                # Get base filename without extension
-                base_name = os.path.splitext(os.path.basename(self.current_file))[0]
-                session_file = os.path.join('sessions', f'{base_name}_session.json')
-                old_session_file = os.path.join('sessions', f'{base_name}_session.pkl')
-                
+
             if os.path.exists(session_file):
                 with open(session_file, 'r', encoding='utf-8') as f:
                     session_data = json.load(f)
-                
+                    
                 # Load document data
-                self.document_data = session_data.get('document_data', {
-                    'page_structures': {},
-                    'translations': {},
-                    'metadata': {}
-                })
-                
-                # Convert string page numbers to integers in page_structures
-                if 'page_structures' in self.document_data:
-                    self.document_data['page_structures'] = {
-                        int(k): v for k, v in self.document_data['page_structures'].items()
-                    }
-                
-                # Convert string keys back to tuples in translations
-                if 'translations' in self.document_data:
-                    translations = {}
-                    for key, value in self.document_data['translations'].items():
-                        try:
-                            page_num, language = key.split('_')
-                            translations[(int(page_num), language)] = value
-                        except ValueError:
-                            logger.warning(f"Invalid translation key format: {key}")
-                    self.document_data['translations'] = translations
+                if 'document_data' in session_data:
+                    self.document_data = session_data['document_data']
+                    
+                    # Convert string page numbers to integers in page_structures
+                    if 'page_structures' in self.document_data:
+                        self.document_data['page_structures'] = {
+                            int(k): v for k, v in self.document_data['page_structures'].items()
+                        }
+                    
+                    # Convert string keys to tuples in translations
+                    if 'translations' in self.document_data:
+                        translations = {}
+                        for key, value in self.document_data['translations'].items():
+                            try:
+                                page_num, language = key.split('_')
+                                translations[(int(page_num), language)] = value
+                            except ValueError:
+                                logger.warning(f"Invalid translation key format: {key}")
+                        self.document_data['translations'] = translations
                 
                 # Load translation options
                 self.auto_translate_checkbox.setChecked(session_data.get('auto_translate', False))
@@ -639,6 +637,9 @@ class PDFViewer(QMainWindow):
                     logger.info(f"Structure: {structure}")
                     # Ensure the structure is properly formatted
                     if isinstance(structure, dict) and 'structure' in structure:
+                        # Enable bounding boxes
+                        self.pdf_display.show_bounding_boxes = True
+                        self.show_boxes_checkbox.setChecked(True)
                         self.pdf_display.set_page_structure(self.current_page, structure)
                         self.pdf_display.update()  # Force repaint
                         # Show the page structure in the structure text area
@@ -730,6 +731,9 @@ class PDFViewer(QMainWindow):
         self.model_combo = QComboBox()
         self.model_combo.addItem("GPT-3.5 Turbo", "gpt-3.5-turbo")
         self.model_combo.addItem("GPT-4 Turbo", "gpt-4-turbo")
+        self.model_combo.addItem("GPT-4o mini", "gpt-4o-mini")
+        # select the default model
+        self.model_combo.setCurrentIndex(2)
         self.model_combo.setToolTip("Select the AI model for translation")
         
         # Add debug level selection combo box
@@ -938,22 +942,28 @@ class PDFViewer(QMainWindow):
 
     def on_view_tab_changed(self, index):
         """Handle tab change between original and translated views"""
-        if index == 1:  # Translated view
-            # Update the translated page display
-            if self.current_page in self.pdf_display.page_structures:
-                structure = self.pdf_display.page_structures[self.current_page]
-                current_language = self.output_language_combo.currentText()
-                cache_key = (self.current_page, current_language)
+        try:
+            if index == 1:  # Translated view
+                # Update the translated page display
+                if self.current_page in self.document_data['page_structures']:
+                    structure = self.document_data['page_structures'][self.current_page]
+                    current_language = self.output_language_combo.currentText()
+                    cache_key = (self.current_page, current_language)
+                    
+                    if cache_key in self.document_data['translations']:
+                        translation = self.document_data['translations'][cache_key]
+                        self.translated_display.set_page(self.current_page, structure, translation)
+                    else:
+                        self.status_label.showMessage("No translation available for this page", 3000)
+            else:  # Original view
+                # Update the original page display
+                self.update_page_display()
                 
-                if cache_key in self.document_data['translations']:
-                    translation = self.document_data['translations'][cache_key]
-                    self.translated_display.set_page(self.current_page, structure, translation)
-                else:
-                    self.status_label.showMessage("No translation available for this page", 3000)
-        else:  # Original view
-            # Update the original page display
-            self.update_page_display()
-        
+        except Exception as e:
+            logger.error(f"Error in on_view_tab_changed: {str(e)}")
+            logger.error("Full error details:", exc_info=True)
+            self.status_label.showMessage(f"Error changing view: {str(e)}", 3000)
+    
     def open_pdf(self):
         file_path, _ = QFileDialog.getOpenFileName(self, "Open PDF", "", "PDF Files (*.pdf)")
         
@@ -1336,43 +1346,60 @@ class PDFViewer(QMainWindow):
         self.status_label.showMessage("Pre-translating next page...")
     
     def on_translation_complete(self, translated_text, page_num, language_name):
-        """Callback when background translation completes"""
+        """Handle completed translation"""
         try:
-            # Log successful translation completion
-            logger.info(f"Translation completed - Page {page_num+1} - Language: {language_name}")
+            # Check if the translation is structured
+            is_structured = any(tag in translated_text for tag in ['<header>', '<heading1>', '<paragraph>', '<footnote>', '<footer>'])
             
-            # Store in cache
-            cache_key = (page_num, language_name)
-            self.document_data['translations'][cache_key] = translated_text
-            
-            # Update progress bar if this is for the current output language
-            if language_name == self.output_language_combo.currentText():
-                # Unmark as translating and mark as translated
-                self.translation_progress.unmark_page_translating(page_num)
-                self.translation_progress.mark_page_translated(page_num)
-            
-            # Clear status message if this is the look-ahead translation
-            if page_num == self.current_page + 1:
-                self.status_label.clearMessage()
-            
-            # If this is for the current page, update the display
-            if page_num == self.current_page and language_name == self.output_language_combo.currentText():
-                self.translated_text.setText(translated_text)
+            if is_structured:
+                # Parse the structured translation
+                structured_translation = {}
+                for line in translated_text.split('\n'):
+                    for tag in ['header', 'heading1', 'paragraph', 'footnote', 'footer']:
+                        if f"<{tag}>" in line and f"</{tag}>" in line:
+                            start = line.find(f"<{tag}>") + len(f"<{tag}>")
+                            end = line.find(f"</{tag}>")
+                            if start < end:
+                                text = line[start:end].strip()
+                                structured_translation[tag] = text
+                                break
                 
-            # Save session to ensure translation is persisted
-            logger.info(f"Saving session after translation of page {page_num+1}")
-            self.save_session()
-            logger.info(f"Session saved successfully with translation for page {page_num+1}")
+                # Store the structured translation
+                cache_key = (page_num, language_name)
+                self.document_data['translations'][cache_key] = structured_translation
+                
+                # Display the translation
+                self.display_translation(structured_translation)
+            else:
+                # Regular translation
+                cache_key = (page_num, language_name)
+                self.document_data['translations'][cache_key] = translated_text
+                self.translated_text.setText(translated_text)
             
+            # Update progress bar
+            self.translation_progress.mark_page_translated(page_num)
+            
+            # Save session
+            try:
+                self.save_session()
+                logger.info(f"Session saved after translation of page {page_num}")
+            except Exception as e:
+                logger.error(f"Error saving session after translation: {str(e)}")
+                self.status_label.showMessage("Error saving session", 3000)
+            
+            # Update UI
+            self.translate_btn.setEnabled(True)
+            self.status_label.showMessage(f"Translation complete for page {page_num + 1}", 3000)
+            
+            # Start look-ahead translation if enabled
+            if self.look_ahead_checkbox.isChecked():
+                self.start_look_ahead_translation()
+                
         except Exception as e:
-            # Log error
-            logger.error(f"Error handling translation result: {str(e)}")
+            logger.error(f"Error in on_translation_complete: {str(e)}")
             logger.error("Full error details:", exc_info=True)
-            self.status_label.showMessage(f"Error saving translation: {str(e)}", 5000)
-        finally:
-            # Always attempt to restore cursor when a translation completes for the current page
-            if page_num == self.current_page:
-                self.ensure_normal_cursor()
+            self.status_label.showMessage(f"Error processing translation: {str(e)}", 3000)
+            self.translate_btn.setEnabled(True)
     
     def check_api_key(self):
         """Check if API key is available, and if not, request it from user"""
@@ -1616,214 +1643,89 @@ class PDFViewer(QMainWindow):
             self.structure_text.setText(f"Error displaying analysis results:\n{str(e)}")
 
     def translate_text(self, force_new_translation=True):
-        """Translate the extracted text using OpenAI's GPT API with structured translation"""
-        # Check if there is any text to translate
-        if not self.extracted_text or self.extracted_text.strip() == "":
-            self.translated_text.setText("No text to translate.")
-            return
-        
-        # Log translation request
-        logger.info(f"Manual translation requested - Page {self.current_page+1} - Force new: {force_new_translation}")
-        
-        language_name = self.output_language_combo.currentText()
-        cache_key = (self.current_page, language_name)
-        
-        # Check if translation is already in cache and use it if not forcing new translation
-        if not force_new_translation and cache_key in self.document_data['translations']:
-            self.display_translation(self.document_data['translations'][cache_key])
-            # Ensure cursor is restored in case this was called from automatic translation
-            QApplication.restoreOverrideCursor()
-            return
-            
-        # Always set cursor to wait cursor, regardless of previous state
-        # Store current cursor override state
-        cursor_already_waiting = QApplication.overrideCursor() is not None
-        
-        # Only change cursor if it's not already in waiting state
-        if not cursor_already_waiting:
-            QApplication.setOverrideCursor(QCursor(Qt.WaitCursor))
-        
-        # Update status message
-        self.translated_text.setText("Translating...")
-        QApplication.processEvents()  # Update UI immediately
-        
-        output_lang_name = self.output_language_combo.currentText()
-        output_lang_code = self.output_language_combo.currentData()
-        
-        input_lang_code = self.input_language_combo.currentData()
-        input_lang_name = self.input_language_combo.currentText()
-        
-        # If auto-detect, we need to detect the language
-        if input_lang_code == "auto":
-            self.status_label.showMessage("Detecting language...")
-            QApplication.processEvents()  # Update UI immediately
-            self.detected_language = self.detect_language(self.extracted_text)
-            input_lang_code = self.detected_language
-            
-            # Update input language combo box and get the language name
-            for i in range(self.input_language_combo.count()):
-                if self.input_language_combo.itemData(i) == input_lang_code:
-                    input_lang_name = self.input_language_combo.itemText(i)
-                    self.input_language_combo.setCurrentIndex(i)
-                    break
-            
-            self.status_label.showMessage(f"Detected language: {input_lang_name}", 3000)
-        
+        """Translate the extracted text"""
         try:
-            # Check for API key
-            if not os.getenv('OPENAI_API_KEY'):
-                # Restore cursor before showing dialog
-                if not cursor_already_waiting:
-                    QApplication.restoreOverrideCursor()
+            # Check if we have a document
+            if not self.doc:
+                return
                 
-                # Request API key from user
-                if not self.request_api_key():
-                    self.translated_text.setText("Translation canceled: No API key provided.")
-                    return
+            # Get the current page structure
+            if self.current_page not in self.document_data['page_structures']:
+                logger.warning(f"No structure found for page {self.current_page}")
+                return
                 
-                # Re-apply wait cursor if we're continuing with translation
-                QApplication.setOverrideCursor(QCursor(Qt.WaitCursor))
+            structure = self.document_data['page_structures'][self.current_page]
+            if not isinstance(structure, dict) or 'structure' not in structure:
+                logger.warning(f"Invalid structure format for page {self.current_page}")
+                return
+                
+            structure_data = structure['structure']
+            if 'elements' not in structure_data:
+                logger.warning(f"No elements found in structure for page {self.current_page}")
+                return
+                
+            # Get the selected languages
+            input_lang_code = self.input_language_combo.currentData()
+            output_lang_code = self.output_language_combo.currentData()
+            output_lang_name = self.output_language_combo.currentText()
             
-            # Get the page structure if available
-            page_structure = None
-            if self.current_page in self.document_data['page_structures']:
-                page_structure = self.document_data['page_structures'][self.current_page]
-                if isinstance(page_structure, dict) and 'structure' in page_structure:
-                    page_structure = page_structure['structure']
+            # Create cache key
+            cache_key = (self.current_page, output_lang_code)
             
-            # If we have page structure, use structured translation
-            if page_structure and 'elements' in page_structure:
-                self.status_label.showMessage("Translating with structure...")
-                QApplication.processEvents()
+            # Check if we already have a translation
+            if not force_new_translation and cache_key in self.document_data['translations']:
+                logger.info(f"Using cached translation for page {self.current_page}")
+                self.display_translation(self.document_data['translations'][cache_key])
+                return
                 
-                # Prepare the messages for GPT
-                messages = [
-                    {"role": "system", "content": f"You are a professional translator. Translate the provided text from {input_lang_name} to {output_lang_name} accurately while maintaining the original meaning and context. Preserve the structure of the text, including headers, paragraphs, and other elements. For each element, provide the translation in this format: [ELEMENT_TYPE] translated_text"}
-                ]
+            # Check API key
+            if not self.check_api_key():
+                return
                 
-                # Add the page structure information
-                structure_info = "The text is structured as follows:\n"
-                for element in page_structure['elements']:
-                    category = element.get('category', 'unknown')
-                    if 'content' in element and 'html' in element['content']:
-                        content = element['content']['html']
-                        # Clean HTML tags for the prompt
-                        content = re.sub('<[^<]+?>', '', content)
-                        structure_info += f"\n[{category.upper()}]\n{content}\n"
-                
-                messages.append({"role": "user", "content": f"Translate the following structured text to {output_lang_name}:\n\n{structure_info}"})
-                
-                # Get the selected model
-                model = self.model_combo.currentData()
-                
-                # Mark the current page as translating in the progress bar
-                self.translation_progress.mark_page_translating(self.current_page)
-                
-                # Call OpenAI API with version-appropriate syntax
-                if is_new_version:
-                    # For openai >= 1.0.0
-                    response = openai.chat.completions.create(
-                        model=model,
-                        messages=messages,
-                        temperature=0.3,
-                        max_tokens=2000
-                    )
-                    translated = response.choices[0].message.content.strip()
-                else:
-                    # For openai < 1.0.0 (older versions)
-                    response = openai.ChatCompletion.create(
-                        model=model,
-                        messages=messages,
-                        temperature=0.3,
-                        max_tokens=2000
-                    )
-                    translated = response.choices[0].message['content'].strip()
-                
-                # Parse the structured translation
-                structured_translation = self.parse_structured_translation(translated, page_structure)
-                
-                # Store translation in cache
-                self.document_data['translations'][cache_key] = structured_translation
-                
-                # Display the translation
-                self.display_translation(structured_translation)
-                
-            else:
-                # Fall back to regular translation if no structure available
-                self.status_label.showMessage("Translating without structure...")
-                QApplication.processEvents()
-            
-            # Get actual text to translate (remove the continuation marker if present)
-            text_to_translate = self.extracted_text
-            continuation_marker = "\n[...continuation from next page...]\n"
-            
-            # Handle whether we need to format the translated text specially
-            has_continuation = continuation_marker in text_to_translate
-            
-            if has_continuation:
-                # Split the text at the continuation marker
-                parts = text_to_translate.split(continuation_marker)
-                
-                # Add a special instruction for the model to handle the continuation correctly
-                instruction = ("The text below contains a main part followed by a continuation from the next page. "
-                             "Translate it naturally as a continuous piece, but use [[[...]]] to mark where the page break occurs.")
-                
-                text_to_translate = text_to_translate.replace(continuation_marker, " ")  # Replace with a space for translation
-            
-            # Prepare the messages for GPT
-            messages = [
-                {"role": "system", "content": f"You are a professional translator. Translate the provided text from {input_lang_name} to {output_lang_name} accurately while maintaining the original meaning and context."}
-            ]
-            
-            # Add continuation handling instruction if needed
-            if has_continuation:
-                messages[0]["content"] += " " + instruction
-            
-            messages.append({"role": "user", "content": f"Translate the following text to {output_lang_name}:\n\n{text_to_translate}"})
-            
             # Get the selected model
             model = self.model_combo.currentData()
             
-            # Mark the current page as translating in the progress bar
-            self.translation_progress.mark_page_translating(self.current_page)
-            
-            # Call OpenAI API with version-appropriate syntax
-            if is_new_version:
-                # For openai >= 1.0.0
-                response = openai.chat.completions.create(
-                        model=model,
-                    messages=messages,
-                    temperature=0.3,
-                    max_tokens=2000
-                )
-                translated = response.choices[0].message.content.strip()
-            else:
-                # For openai < 1.0.0 (older versions)
-                response = openai.ChatCompletion.create(
-                        model=model,
-                    messages=messages,
-                    temperature=0.3,
-                    max_tokens=2000
-                )
-                translated = response.choices[0].message['content'].strip()
-            
-            # Store translation in cache
-                self.document_data['translations'][cache_key] = translated
-            
-            # Display the translation
-            self.translated_text.setText(translated)
-            
-            # Start look-ahead translation for next page after completing this one
-            if self.look_ahead_checkbox.isChecked():
-                self.start_look_ahead_translation()
+            # Prepare structured text for translation
+            structured_text = []
+            for element in structure_data['elements']:
+                category = element.get('category', 'unknown')
+                content = element.get('content', {})
+                text = content.get('text', '')
+                if text:
+                    structured_text.append(f"<{category}>{text}</{category}>")
+                    
+            if not structured_text:
+                logger.warning("No text found in structure elements")
+                return
                 
-        except Exception as e:
-            self.translated_text.setText(f"Translation error: {str(e)}\n\nTip: Try running 'pip install openai==0.28' to downgrade to a compatible version.")
+            text_to_translate = "\n".join(structured_text)
+            logger.debug(f"Structured text to translate: {text_to_translate}")
             
-        finally:
-            # Always restore the cursor if we set it
-            if not cursor_already_waiting:
-                QApplication.restoreOverrideCursor()
+            # Create translation worker
+            worker = TranslationWorker(
+                text_to_translate,
+                self.current_page,
+                input_lang_code,
+                output_lang_code,
+                output_lang_name,
+                model
+            )
+            
+            # Connect signals
+            worker.translationComplete.connect(self.on_translation_complete)
+            
+            # Start translation
+            worker.start()
+            
+            # Update UI
+            self.translate_btn.setEnabled(False)
+            self.status_label.showMessage(f"Translating page {self.current_page + 1} to {output_lang_name}...")
+            
+        except Exception as e:
+            logger.error(f"Error in translate_text: {str(e)}")
+            logger.error("Full error details:", exc_info=True)
+            self.status_label.showMessage(f"Translation error: {str(e)}", 3000)
+            self.translate_btn.setEnabled(True)
 
     def parse_structured_translation(self, translated_text, original_structure):
         """Parse the structured translation into a format that preserves the original structure"""
@@ -1860,23 +1762,22 @@ class PDFViewer(QMainWindow):
             return translated_text
 
     def display_translation(self, translation):
-        """Display the translation in the text area, handling both structured and unstructured translations"""
+        """Display the translation in the text edit"""
         try:
-            if isinstance(translation, dict) and 'elements' in translation:
-                # Display structured translation
-                display_text = ""
-                for element in translation['elements']:
-                    category = element.get('category', 'unknown').upper()
-                    content = element.get('translated_content', '')
-                    display_text += f"[{category}]\n{content}\n\n"
-                self.translated_text.setText(display_text.strip())
+            if isinstance(translation, dict):
+                # Format structured translation as a string
+                formatted_text = []
+                for category, text in translation.items():
+                    formatted_text.append(f"[{category.upper()}]\n{text}\n")
+                self.translated_text.setText("\n".join(formatted_text))
             else:
-                # Display unstructured translation
+                # Regular translation
                 self.translated_text.setText(translation)
                 
         except Exception as e:
             logger.error(f"Error displaying translation: {str(e)}")
-            self.translated_text.setText(str(translation))
+            logger.error("Full error details:", exc_info=True)
+            self.translated_text.setText(f"Error displaying translation: {str(e)}")
 
     def auto_save_session(self):
         """Automatically save the session periodically"""
