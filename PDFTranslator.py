@@ -3026,18 +3026,19 @@ class PDFDisplayWidget(QWidget):
             logger.debug(f"Drawing box for {category} with coordinates: {coords}")
             
             # Set color based on category
+            alpha = 32
             if category == 'header':
-                color = QColor(255, 0, 0, 128)  # Red
+                color = QColor(255, 0, 0, alpha)  # Red
             elif category == 'heading1':
-                color = QColor(0, 255, 0, 128)  # Green
+                color = QColor(0, 255, 0, alpha)  # Green
             elif category == 'paragraph':
-                color = QColor(0, 0, 255, 128)  # Blue
+                color = QColor(0, 0, 255, alpha)  # Blue
             elif category == 'footnote':
-                color = QColor(255, 255, 0, 128)  # Yellow
+                color = QColor(255, 255, 0, alpha)  # Yellow
             elif category == 'footer':
-                color = QColor(255, 0, 255, 128)  # Magenta
+                color = QColor(255, 0, 255, alpha)  # Magenta
             else:
-                color = QColor(128, 128, 128, 128)  # Gray
+                color = QColor(128, 128, 128, alpha)  # Gray
                 
             # Create polygon from coordinates
             polygon = QPolygonF()
@@ -3061,6 +3062,273 @@ class PDFDisplayWidget(QWidget):
                 x = int(first_point.x())
                 y = int(first_point.y() - 5)
                 painter.drawText(x, y, category)
+
+class PDFDisplayWidget(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.pixmap = None
+        self.current_page = None
+        self.page_structure = None
+        self.show_bounding_boxes = True
+
+        # ---- NEW FIELDS FOR ZOOM AND PAN ----
+        self.zoom_factor = 1.0
+        self.pan_offset = QPointF(0, 0)
+        self.is_panning = False
+        self.last_mouse_pos = QPointF(0, 0)
+        # -------------------------------------
+
+    def set_page(self, page_num, pixmap):
+        """Set the current page to display"""
+        self.current_page = page_num
+        self.pixmap = pixmap
+
+        # Get the main window instance to access document data
+        main_window = self.window()
+        if hasattr(main_window, 'document_data'):
+            # Get the structure for the new page
+            structure = main_window.document_data['page_structures'].get(page_num)
+            logger.debug(f"Setting page {page_num} structure: {structure}")
+            if structure:
+                self.page_structure = structure
+            else:
+                self.page_structure = None
+                logger.debug(f"No structure found for page {page_num}")
+
+        self.update()
+
+    def set_page_structure(self, page_num, structure):
+        """Set the structure data for the current page"""
+        logger.debug(f"Setting page structure for page {page_num}: {structure}")
+        if page_num == self.current_page:
+            self.page_structure = structure
+            self.update()
+
+    def toggle_bounding_boxes(self, state):
+        self.show_bounding_boxes = state
+        self.update()
+
+    def paintEvent(self, event):
+        logger.debug("Painting event")
+        if self.pixmap is None:
+            return
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        # Calculate scaling to fit the widget
+        widget_size = self.size()
+        pixmap_size = self.pixmap.size()
+
+        # The original scale to make the pixmap fit in the widget
+        scale_x = widget_size.width() / pixmap_size.width()
+        scale_y = widget_size.height() / pixmap_size.height()
+        base_scale = min(scale_x, scale_y)
+
+        # ---- MODIFIED PART: Multiply by zoom_factor ----
+        final_scale = base_scale * self.zoom_factor
+        scaled_width = pixmap_size.width() * final_scale
+        scaled_height = pixmap_size.height() * final_scale
+
+        # Calculate the position to center the scaled pixmap,
+        # then apply the pan_offset
+        x = (widget_size.width() - scaled_width) / 2 + self.pan_offset.x()
+        y = (widget_size.height() - scaled_height) / 2 + self.pan_offset.y()
+
+        # Draw the scaled pixmap
+        painter.drawPixmap(
+            QRectF(x, y, scaled_width, scaled_height),
+            self.pixmap,
+            QRectF(0, 0, pixmap_size.width(), pixmap_size.height())
+        )
+
+        # Draw bounding boxes if enabled and structure exists
+        logger.debug(f"Drawing bounding boxes: {self.show_bounding_boxes} and {self.page_structure}")
+        if self.show_bounding_boxes and self.page_structure:
+            self.draw_bounding_boxes(painter, x, y, final_scale)
+
+        painter.end()
+
+    def draw_bounding_boxes(self, painter, offset_x, offset_y, scale):
+        """Draw bounding boxes for page elements"""
+        logger.debug("Drawing bounding boxes")
+        if not self.page_structure or 'structure' not in self.page_structure:
+            logger.debug("No structure or structure data found")
+            return
+
+        structure_data = self.page_structure['structure']
+        logger.debug(f"Structure data: {structure_data}")
+        if 'elements' not in structure_data:
+            logger.debug("No elements found in structure")
+            return
+
+        logger.debug(f"Drawing bounding boxes for {len(structure_data['elements'])} elements")
+
+        for element in structure_data['elements']:
+            if 'coordinates' not in element:
+                logger.debug("Element has no coordinates")
+                continue
+
+            coords = element['coordinates']
+            category = element.get('category', 'unknown').lower()
+            logger.debug(f"Drawing box for {category} with coordinates: {coords}")
+
+            # Set color based on category
+            alpha = 32
+            if category == 'header':
+                color = QColor(255, 0, 0, alpha)  # Red
+            elif category == 'heading1':
+                color = QColor(0, 255, 0, alpha)  # Green
+            elif category == 'paragraph':
+                color = QColor(0, 0, 255, alpha)  # Blue
+            elif category == 'footnote':
+                color = QColor(255, 255, 0, alpha)  # Yellow
+            elif category == 'footer':
+                color = QColor(255, 0, 255, alpha)  # Magenta
+            else:
+                color = QColor(128, 128, 128, alpha)  # Gray
+
+            # Create polygon from coordinates
+            polygon = QPolygonF()
+            for point in coords:
+                # Scale and offset the coordinates
+                x = offset_x + (point['x'] * scale * self.pixmap.width())
+                y = offset_y + (point['y'] * scale * self.pixmap.height())
+                logger.debug(f"Point coordinates: x={x}, y={y}")
+                polygon.append(QPointF(x, y))
+
+            # Draw the polygon
+            painter.setPen(QPen(color, 2))
+            painter.setBrush(QBrush(color))
+            painter.drawPolygon(polygon)
+
+            # Draw category label
+            painter.setPen(QPen(QColor(0, 0, 0)))
+            if polygon.size() > 0:
+                first_point = polygon.at(0)
+                # Convert float coordinates to integers for drawText
+                label_x = int(first_point.x())
+                label_y = int(first_point.y() - 5)
+                painter.drawText(label_x, label_y, category)
+
+    # ----------- NEW METHODS FOR ZOOM AND PAN -----------
+    def wheelEvent(self, event):
+        """
+        Zoom in/out centered on the mouse cursor when the user
+        scrolls the mouse wheel.
+        """
+        # Positive delta => zoom in; negative => zoom out
+        wheel_delta = event.angleDelta().y()
+        if wheel_delta == 0:
+            return
+
+        # Choose a zoom step factor. Adjust to taste.
+        zoom_step = 1.2 if wheel_delta > 0 else 1 / 1.2
+        
+        # The position of the cursor in widget coordinates
+        cursor_pos = event.position()  # In PyQt6; for PyQt5 use event.posF()
+        # Convert to a QPointF
+        cursor_point = QPointF(cursor_pos.x(), cursor_pos.y())
+
+        # Compute the old scene coordinates (before zoom) of that cursor
+        # relative to the scaled+offset image. We'll solve so that
+        # after we change self.zoom_factor, the same scene point remains
+        # under the cursor in widget coords.
+        
+        # First get the base scale (fit-to-widget) again to be consistent
+        widget_size = self.size()
+        pixmap_size = self.pixmap.size()
+        if pixmap_size.isNull():
+            return  # No pixmap to zoom
+
+        scale_x = widget_size.width() / pixmap_size.width()
+        scale_y = widget_size.height() / pixmap_size.height()
+        base_scale = min(scale_x, scale_y)
+
+        # Our final scale prior to this event
+        old_final_scale = base_scale * self.zoom_factor
+        
+        # The current top-left after pan offset:
+        current_width = pixmap_size.width() * old_final_scale
+        current_height = pixmap_size.height() * old_final_scale
+        current_x = (widget_size.width() - current_width) / 2 + self.pan_offset.x()
+        current_y = (widget_size.height() - current_height) / 2 + self.pan_offset.y()
+
+        # Convert cursor position to "scene" coords
+        # where (0,0) is top-left of scaled pixmap
+        scene_x = (cursor_point.x() - current_x) / old_final_scale
+        scene_y = (cursor_point.y() - current_y) / old_final_scale
+
+        # Adjust the zoom factor
+        self.zoom_factor *= zoom_step
+        # Prevent zoom_factor from going too small or large
+        self.zoom_factor = max(0.1, min(self.zoom_factor, 10.0))
+
+        # After changing zoom_factor, compute new final scale:
+        new_final_scale = base_scale * self.zoom_factor
+        new_width = pixmap_size.width() * new_final_scale
+        new_height = pixmap_size.height() * new_final_scale
+        new_x = (widget_size.width() - new_width) / 2
+        new_y = (widget_size.height() - new_height) / 2
+
+        # Recompute what top-left would have to be so that
+        # (scene_x, scene_y) is still under cursor_point.
+        # We want: 
+        #   cursor_point.x() = new_top_left_x + scene_x * new_final_scale
+        #   cursor_point.y() = new_top_left_y + scene_y * new_final_scale
+        #
+        # so new_top_left_x = cursor_point.x() - scene_x * new_final_scale
+        #    new_top_left_y = cursor_point.y() - scene_y * new_final_scale
+        #
+        # We'll store that difference in self.pan_offset (relative to the
+        # default centering new_x, new_y).
+        desired_top_left_x = cursor_point.x() - scene_x * new_final_scale
+        desired_top_left_y = cursor_point.y() - scene_y * new_final_scale
+
+        # Our "natural" centering is (new_x, new_y). The difference to that
+        # is how much we shift with the pan_offset
+        dx = desired_top_left_x - new_x
+        dy = desired_top_left_y - new_y
+
+        # Update pan_offset
+        self.pan_offset = QPointF(dx, dy)
+
+        self.update()
+
+    def mousePressEvent(self, event):
+        """
+        Start panning when the user presses the left mouse button.
+        """
+        if event.button() == Qt.LeftButton:
+            self.is_panning = True
+            self.last_mouse_pos = event.pos()  # PyQt6; use event.pos() in PyQt5
+            self.setCursor(Qt.ClosedHandCursor)
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        """
+        If panning is active, update the pan_offset.
+        """
+        if self.is_panning:
+            new_mouse_pos = event.pos()
+            delta = new_mouse_pos - self.last_mouse_pos
+            self.last_mouse_pos = new_mouse_pos
+
+            # Just shift pan_offset by the mouse delta
+            self.pan_offset += delta
+            self.update()
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        """
+        Stop panning on left button release.
+        """
+        if event.button() == Qt.LeftButton:
+            self.is_panning = False
+            self.setCursor(Qt.ArrowCursor)
+        super().mouseReleaseEvent(event)
+    # ----------------------------------------------------
+
 
 class TranslatedPageDisplayWidget(QWidget):
     def __init__(self, parent=None):
