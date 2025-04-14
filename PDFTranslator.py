@@ -19,10 +19,10 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtGui import (
     QPixmap, QPainter, QColor, QTextCursor, QPen, QBrush, QImage, QFont, 
-    QFontMetrics, QCursor, QTextFormat, QTextCharFormat, QPalette
+    QFontMetrics, QCursor, QTextFormat, QTextCharFormat, QPalette, QPolygonF
 )
 from PyQt5.QtCore import (
-    Qt, QThread, pyqtSignal, QRectF, QSize, QTimer, QRect, QPoint, QSettings
+    Qt, QThread, pyqtSignal, QRectF, QSize, QTimer, QRect, QPoint, QSettings, QPointF
 )
 
 # Setup logging
@@ -352,11 +352,18 @@ class TranslationProgressBar(QWidget):
     def mark_page_translated(self, page_num):
         """Mark a page as translated"""
         self.translated_pages.add(page_num)
+        logger.debug(f"Marked page {page_num} as translated")
         # Remove from translating pages if it was there
         if page_num in self.translating_pages:
             self.translating_pages.remove(page_num)
         self.update()
-        
+
+    def mark_page_structure(self, page_num):
+        """Mark a page as translated"""
+        self.structure_pages.add(page_num)
+        logger.debug(f"Marked page {page_num} as structure analyzed")
+        self.update()
+
     def mark_page_translating(self, page_num):
         """Mark a page as currently being translated"""
         if page_num not in self.translated_pages:  # Only mark as translating if not already translated
@@ -373,11 +380,17 @@ class TranslationProgressBar(QWidget):
         """Set the current page indicator"""
         self.current_page = page_num
         self.update()
-        
+
+    def set_total_pages(self, total_pages):
+        """Set the current page indicator"""
+        self.total_pages = total_pages
+        self.update()
+
     def clear(self):
         """Reset the progress bar"""
         self.total_pages = 0
         self.translated_pages = set()
+        self.structure_pages = set()
         self.translating_pages = set()
         self.current_page = 0
         self.aggregation_factor = 1
@@ -421,6 +434,7 @@ class TranslationProgressBar(QWidget):
         
     def paintEvent(self, event):
         """Draw the blocks representing pages"""
+        logger.debug(f"Painting event for page {self.current_page} of {self.total_pages}")
         if self.total_pages == 0:
             return
             
@@ -485,6 +499,12 @@ class TranslationProgressBar(QWidget):
                     x = 1 + (i * block_width)
                     painter.fillRect(int(x), 1, int(block_width) + 1, height - 2, QColor(220, 0, 0))  # Red
             
+            # Then draw all structure analyzed pages in blue
+            for i in range(self.total_pages):
+                if i in self.structure_pages:
+                    x = 1 + (i * block_width)
+                    painter.fillRect(int(x), 1, int(block_width) + 1, height - 2, QColor(255, 215, 0))  # Yellow
+            
             # Then draw all translated pages in green
             for i in range(self.total_pages):
                 if i in self.translated_pages:
@@ -496,7 +516,7 @@ class TranslationProgressBar(QWidget):
                 if i in self.translating_pages:
                     x = 1 + (i * block_width)
                     painter.fillRect(int(x), 1, int(block_width) + 1, height - 2, QColor(255, 215, 0))  # Gold/Yellow
-            
+
             # Draw the current page indicator with a blue border
             if 0 <= self.current_page < self.total_pages:
                 x = 1 + (self.current_page * block_width)
@@ -541,6 +561,11 @@ class PDFViewer(QMainWindow):
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
         
+
+        # Create PDF display widget
+        self.pdf_display = PDFDisplayWidget()
+        
+
         # Create top button layout
         top_btn_layout = QHBoxLayout()
         
@@ -574,6 +599,11 @@ class PDFViewer(QMainWindow):
         self.analyze_btn = QPushButton('Analyze')
         self.analyze_btn.clicked.connect(lambda: self.analyze_page(True))
         self.analyze_btn.setEnabled(False)
+
+        # Add checkbox for showing bounding boxes
+        self.show_boxes_checkbox = QCheckBox("Show Bounding Boxes")
+        self.show_boxes_checkbox.setChecked(True)
+        self.show_boxes_checkbox.toggled.connect(self.pdf_display.toggle_bounding_boxes)
 
         # Add translate button
         self.translate_btn = QPushButton('Translate')
@@ -612,6 +642,7 @@ class PDFViewer(QMainWindow):
         top_btn_layout.addWidget(self.next_btn)
         top_btn_layout.addLayout(page_layout)
         top_btn_layout.addWidget(self.analyze_btn)
+        top_btn_layout.addWidget(self.show_boxes_checkbox)
         top_btn_layout.addWidget(self.translate_btn)
         top_btn_layout.addWidget(self.translate_all_btn)
         top_btn_layout.addWidget(self.export_btn)
@@ -644,9 +675,6 @@ class PDFViewer(QMainWindow):
         left_tabs.addTab(self.original_text, "Original Text")
         left_tabs.addTab(self.structure_text, "Structure")
         
-        # Create PDF display widget
-        self.pdf_display = PDFDisplayWidget()
-        
         # Create translated display widget
         self.translated_display = TranslatedPageDisplayWidget()
         
@@ -673,10 +701,6 @@ class PDFViewer(QMainWindow):
         # Make splitter the central widget of the main splitter
         self.splitter = display_splitter
         
-        # Add checkbox for showing bounding boxes
-        self.show_boxes_checkbox = QCheckBox("Show Bounding Boxes")
-        self.show_boxes_checkbox.setChecked(True)
-        self.show_boxes_checkbox.toggled.connect(self.pdf_display.toggle_bounding_boxes)
         
         # Add the status bar
         self.statusBar().addPermanentWidget(self.show_boxes_checkbox)
@@ -838,7 +862,7 @@ class PDFViewer(QMainWindow):
 
     def get_page_structure(self, page_num):
         """Get the page structure for a specific page"""
-        return self.document_data['page_structures'].get(page_num)
+        return self.document_data['page_structures'].get(str(page_num))
 
     def set_translation(self, page_num, language, translation):
         """Set the translation for a specific page and language"""
@@ -913,7 +937,7 @@ class PDFViewer(QMainWindow):
                 'timestamp': datetime.datetime.now().isoformat(),
                 'total_pages': len(self.doc) if self.doc else 0,
                 'session_info': {
-                    'analyzed_pages': len(self.document_data['page_structures']),
+                    'analyzed_pages': len(set(self.document_data['page_structures'].keys())),
                     'translated_pages': len(self.document_data['translations']),
                     'app_version': '0.0.3'
                 }
@@ -1016,12 +1040,42 @@ class PDFViewer(QMainWindow):
                 self.pdf_path = pdf_path
                 self.pdf_document = fitz.open(pdf_path)
                 self.total_pages = len(self.pdf_document)
-                self.current_page = 0
+                self.current_page = self.document_data.get('current_page', 0)
+                #self.total_pages = self.document_data.get('total_pages', self.total_pages)
                 
                 # Update UI
                 self.update_page_display()
                 self.update_buttons()
+
+                self.translation_progress.set_total_pages(self.total_pages)
+
+                # Load page structures - create a copy before iteration
+                page_structures = dict(self.document_data.get('page_structures', {}))
+                for page_num, structure in list(page_structures.items()):
+                    page_num = int(page_num)  # Convert string key to int
+                    self.translation_progress.mark_page_structure(page_num)
+                    logger.debug(f"Set structure for page {page_num}")
+
+                # Load translations - create a copy before iteration
+                translations = dict(self.document_data.get('translations', {}))
+                for key, translation_data in list(translations.items()):
+                    try:
+                        # Handle string format keys (page_num_language)
+                        if isinstance(key, str) and '_' in key:
+                            parts = key.split('_')
+                            if len(parts) >= 2:
+                                page_num = int(parts[0])
+                                language = parts[1]
+                                self.translation_progress.mark_page_translated(page_num)
+                        else:
+                            logger.warning(f"Skipping invalid translation key format: {key}")
+                    except Exception as e:
+                        logger.error(f"Error processing translation key {key}: {str(e)}")
+                        continue
                 
+                self.translation_progress.set_current_page(self.current_page)
+                self.translation_progress.update()
+
                 # Enable bounding boxes if any page has structure
                 if page_structures:
                     self.show_boxes_checkbox.setChecked(True)
@@ -1053,15 +1107,25 @@ class PDFViewer(QMainWindow):
         
     def update_page_display(self):
         """Update the PDF display and text areas with the current page content"""
+        logger.debug(f"Updating page display: current page={self.current_page}")
         try:
             if self.doc is None:
                 return
-            
+                
             # Update PDF display
             page = self.doc.load_page(self.current_page)
             pixmap = page.get_pixmap(matrix=fitz.Matrix(2, 2))  # 2x zoom for better quality
             image = QImage(pixmap.samples, pixmap.width, pixmap.height, pixmap.stride, QImage.Format_RGB888)
             self.pdf_display.set_page(self.current_page, QPixmap.fromImage(image))
+            
+            # Get the page structure if it exists
+            if str(self.current_page) in self.document_data['page_structures']:
+                structure = self.document_data['page_structures'][str(self.current_page)]
+                self.pdf_display.set_page_structure(self.current_page, structure)
+                logger.debug(f"Setting page structure for page {self.current_page}: {structure}")
+            else:
+                self.pdf_display.set_page_structure(self.current_page, None)
+                logger.debug(f"No structure found for page {self.current_page}, {self.document_data['page_structures']}")
             
             # Update page number display
             self.page_input.setText(str(self.current_page + 1))
@@ -1111,7 +1175,7 @@ class PDFViewer(QMainWindow):
             if translation:
                 self.translated_text.setVisible(True)
                 self.translated_text.raise_()
-            
+                
         except Exception as e:
             logger.error(f"Error updating page display: {str(e)}")
             logger.error("Full error details:", exc_info=True)
@@ -1128,6 +1192,13 @@ class PDFViewer(QMainWindow):
         
         # Enable/disable next button
         self.next_btn.setEnabled(self.current_page < len(self.doc) - 1)
+
+    def update_progress_bar(self):
+        """Update the progress bar based on the current page and total pages"""
+        if self.doc and self.document_data:
+            self.translation_progress.set_current_page(self.current_page)
+            #self.translation_progress.set_total_pages(len(self.doc))
+            self.translation_progress.update()
     
     def next_page(self):
         """Go to next page"""
@@ -1135,6 +1206,8 @@ class PDFViewer(QMainWindow):
             self.current_page += 1
             self.update_page_display()
             self.update_buttons()
+            self.translation_progress.set_current_page(self.current_page)
+            self.translation_progress.update()
             
             # Log state after page change
             logger.debug(f"Moved to next page: {self.current_page}")
@@ -1156,6 +1229,8 @@ class PDFViewer(QMainWindow):
             self.current_page -= 1
             self.update_page_display()
             self.update_buttons()
+            self.translation_progress.set_current_page(self.current_page)
+            self.translation_progress.update()
 
             # Log state after page change
             logger.debug(f"Moved to previous page: {self.current_page}")
@@ -1387,7 +1462,7 @@ class PDFViewer(QMainWindow):
             #if isinstance(page_num, int):
             #    page_num = str(page_num)
 
-            original_structure = self.document_data['page_structures'].get(page_num)
+            original_structure = self.document_data['page_structures'].get(str(page_num))
             if not original_structure or 'structure' not in original_structure:
                 logger.error(f"No valid structure found for page {page_num}")
                 return
@@ -1525,7 +1600,7 @@ class PDFViewer(QMainWindow):
                     result = self.upstage_client.post(url, files=files)
                     
                     # Store the analysis result in document_data
-                    self.document_data['page_structures'][self.current_page] = {
+                    self.document_data['page_structures'][str(self.current_page)] = {
                         'timestamp': datetime.datetime.now().isoformat(),
                         'structure': result
                     }
@@ -1537,6 +1612,9 @@ class PDFViewer(QMainWindow):
                     self.pdf_display.show_bounding_boxes = True
                     self.show_boxes_checkbox.setChecked(True)
                     self.pdf_display.update()  # Force repaint
+                    self.translation_progress.mark_page_structure(self.current_page)
+                    self.translation_progress.update()
+                    self.update_page_display()
                     
                     # Auto-save session after analysis
                     self.save_session()
@@ -1569,9 +1647,13 @@ class PDFViewer(QMainWindow):
 
     def draw_bounding_boxes(self, pixmap, analysis_result):
         """Draw bounding boxes and labels on the page image"""
+        logger.debug("Drawing bounding boxes")
         try:
             if not analysis_result or 'elements' not in analysis_result:
+                logger.debug("No analysis result or elements not found")
                 return pixmap
+            
+            logger.debug(f"Analysis result: {analysis_result}")
 
             # Create a QPainter to draw on the pixmap
             painter = QPainter(pixmap)
@@ -1710,11 +1792,11 @@ class PDFViewer(QMainWindow):
                 return
         
             # Get the current page structure
-            if self.current_page not in self.document_data['page_structures']:
+            if str(self.current_page) not in self.document_data['page_structures']:
                 logger.warning(f"No structure found for page {self.current_page}")
                 return
                 
-            structure = self.document_data['page_structures'][self.current_page]
+            structure = self.document_data['page_structures'][str(self.current_page)]
             if not isinstance(structure, dict) or 'structure' not in structure:
                 logger.warning(f"Invalid structure format for page {self.current_page}")
                 return
@@ -1871,7 +1953,7 @@ class PDFViewer(QMainWindow):
                     content = element.get('content', {})
                     text = content.get('text', '')
                     if text:
-                        formatted_text.append(f"[{category.upper()}]")
+                        #formatted_text.append(f"[{category.upper()}]")
                         formatted_text.append(text)
                         formatted_text.append("")  # Add empty line between categories
                 self.translated_text.setText("\n".join(formatted_text))
@@ -2722,6 +2804,8 @@ class PDFViewer(QMainWindow):
             # Update the display
             self.update_page_display()
             self.update_buttons()
+            self.translation_progress.set_current_page(self.current_page)
+            self.translation_progress.update()
             
             # Only translate if auto-translate is enabled
             #if self.auto_translate_checkbox.isChecked():
@@ -2849,108 +2933,134 @@ class PDFViewer(QMainWindow):
 class PDFDisplayWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.current_pixmap = None
+        self.pixmap = None
         self.current_page = None
-        self.show_bounding_boxes = False
-        self.setMinimumSize(400, 600)
+        self.page_structure = None
+        self.show_bounding_boxes = True
         
     def set_page(self, page_num, pixmap):
         """Set the current page to display"""
         self.current_page = page_num
-        self.current_pixmap = pixmap
+        self.pixmap = pixmap
+        
+        # Get the main window instance to access document data
+        main_window = self.window()
+        if hasattr(main_window, 'document_data'):
+            # Get the structure for the new page
+            structure = main_window.document_data['page_structures'].get(page_num)
+            logger.debug(f"Setting page {page_num} structure: {structure}")
+            if structure:
+                self.page_structure = structure
+            else:
+                self.page_structure = None
+                logger.debug(f"No structure found for page {page_num}")
+                
         self.update()
         
     def set_page_structure(self, page_num, structure):
         """Set the structure data for the current page"""
         logger.debug(f"Setting page structure for page {page_num}: {structure}")
-        # Get the main window instance
-        main_window = self.window()
-        if hasattr(main_window, 'document_data'):
-            main_window.document_data['page_structures'][page_num] = structure
-            logger.debug(f"Updated document_data['page_structures']: {main_window.document_data['page_structures']}")
-        self.update()
-        
+        if page_num == self.current_page:
+            self.page_structure = structure
+            self.update()
+            
     def toggle_bounding_boxes(self, state):
-        """Toggle the display of bounding boxes"""
         self.show_bounding_boxes = state
         self.update()
         
     def paintEvent(self, event):
-        """Paint the PDF page with bounding boxes"""
-        painter = None
-        try:
-            # Draw the base image first
-            if self.current_pixmap:
-                painter = QPainter(self)
-                painter.drawPixmap(0, 0, self.current_pixmap)
-                logger.debug(f"Base image drawn at size: {self.current_pixmap.size()}")
-
-            # Get the main window instance
-            main_window = self.window()
-            if not main_window or not hasattr(main_window, 'document_data'):
-                logger.debug("No main window or document_data found")
-                return
-                    
-            # Get the current page structure if available
-            if self.current_page in main_window.document_data['page_structures']:
-                structure = main_window.document_data['page_structures'][self.current_page]
-                logger.debug(f"Painting page {self.current_page} with structure: {structure}")
-
-                # Draw bounding boxes if enabled
-                if self.show_bounding_boxes and structure and 'structure' in structure:
-                    structure_data = structure['structure']
-                    logger.debug(f"Drawing bounding boxes for structure: {structure_data}")
-
-                    if 'elements' in structure_data:
-                        elements = structure_data['elements']
-                        logger.debug(f"Found {len(elements)} elements to draw")
-
-                        for element in elements:
-                            category = element.get('category', 'unknown')
-                            coords = element.get('coordinates', [])
-                            logger.debug(f"Processing element: category={category}, coords={coords}")
-
-                            if len(coords) >= 4:
-                                # Get the actual image dimensions
-                                if self.current_pixmap:
-                                    img_width = self.current_pixmap.width()
-                                    img_height = self.current_pixmap.height()
-                                else:
-                                    img_width = self.width()
-                                    img_height = self.height()
-                                
-                                logger.debug(f"Image dimensions: {img_width}x{img_height}")
-
-                                # Convert normalized coordinates to pixel coordinates
-                                x1 = int(coords[0]['x'] * img_width)
-                                y1 = int(coords[0]['y'] * img_height)
-                                x2 = int(coords[2]['x'] * img_width)
-                                y2 = int(coords[2]['y'] * img_height)
-                                
-                                logger.debug(f"Drawing box for {category} at ({x1}, {y1}, {x2}, {y2})")
-
-                                # Draw the bounding box
-                                painter.setPen(QPen(QColor(255, 0, 0), 2))
-                                painter.drawRect(x1, y1, x2 - x1, y2 - y1)
-                                
-                                # Draw category label
-                                painter.setPen(QPen(QColor(0, 0, 0)))
-                                painter.drawText(x1, y1 - 5, category)
-                            else:
-                                logger.debug(f"Invalid coordinates for {category}: {coords}")
-                    else:
-                        logger.debug("No elements found in structure")
-                else:
-                    logger.debug("Bounding boxes disabled or no structure available")
+        logger.debug("Painting event")
+        if self.pixmap is None:
+            return
+            
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        
+        # Calculate scaling to fit the widget
+        widget_size = self.size()
+        pixmap_size = self.pixmap.size()
+        
+        # Calculate the scaling factor to fit the pixmap within the widget
+        scale_x = widget_size.width() / pixmap_size.width()
+        scale_y = widget_size.height() / pixmap_size.height()
+        scale = min(scale_x, scale_y)
+        
+        # Calculate the position to center the scaled pixmap
+        scaled_width = pixmap_size.width() * scale
+        scaled_height = pixmap_size.height() * scale
+        x = (widget_size.width() - scaled_width) / 2
+        y = (widget_size.height() - scaled_height) / 2
+        
+        # Draw the scaled pixmap
+        painter.drawPixmap(QRectF(x, y, scaled_width, scaled_height), self.pixmap, QRectF(0, 0, pixmap_size.width(), pixmap_size.height()))
+        
+        # Draw bounding boxes if enabled and structure exists
+        logger.debug(f"Drawing bounding boxes: {self.show_bounding_boxes} and {self.page_structure}")
+        if self.show_bounding_boxes and self.page_structure:
+            self.draw_bounding_boxes(painter, x, y, scale)
+            
+        painter.end()
+        
+    def draw_bounding_boxes(self, painter, offset_x, offset_y, scale):
+        """Draw bounding boxes for page elements"""
+        logger.debug("Drawing bounding boxes")
+        if not self.page_structure or 'structure' not in self.page_structure:
+            logger.debug("No structure or structure data found")
+            return
+            
+        structure_data = self.page_structure['structure']
+        logger.debug(f"Structure data: {structure_data}")
+        if 'elements' not in structure_data:
+            logger.debug("No elements found in structure")
+            return
+            
+        logger.debug(f"Drawing bounding boxes for {len(structure_data['elements'])} elements")
+            
+        for element in structure_data['elements']:
+            if 'coordinates' not in element:
+                logger.debug("Element has no coordinates")
+                continue
+                
+            coords = element['coordinates']
+            category = element.get('category', 'unknown').lower()
+            logger.debug(f"Drawing box for {category} with coordinates: {coords}")
+            
+            # Set color based on category
+            if category == 'header':
+                color = QColor(255, 0, 0, 128)  # Red
+            elif category == 'heading1':
+                color = QColor(0, 255, 0, 128)  # Green
+            elif category == 'paragraph':
+                color = QColor(0, 0, 255, 128)  # Blue
+            elif category == 'footnote':
+                color = QColor(255, 255, 0, 128)  # Yellow
+            elif category == 'footer':
+                color = QColor(255, 0, 255, 128)  # Magenta
             else:
-                logger.debug(f"No structure found for page {self.current_page}")
-
-        except Exception as e:
-            logger.error(f"Error in paintEvent: {str(e)}")
-            logger.error("Full error details:", exc_info=True)
-        finally:
-            if painter is not None:
-                painter.end()
+                color = QColor(128, 128, 128, 128)  # Gray
+                
+            # Create polygon from coordinates
+            polygon = QPolygonF()
+            for point in coords:
+                # Scale and offset the coordinates
+                x = offset_x + (point['x'] * scale * self.pixmap.width())
+                y = offset_y + (point['y'] * scale * self.pixmap.height())
+                logger.debug(f"Point coordinates: x={x}, y={y}")
+                polygon.append(QPointF(x, y))
+                
+            # Draw the polygon
+            painter.setPen(QPen(color, 2))
+            painter.setBrush(QBrush(color))
+            painter.drawPolygon(polygon)
+            
+            # Draw category label
+            painter.setPen(QPen(QColor(0, 0, 0)))
+            if polygon.size() > 0:
+                first_point = polygon.at(0)
+                # Convert float coordinates to integers for drawText
+                x = int(first_point.x())
+                y = int(first_point.y() - 5)
+                painter.drawText(x, y, category)
 
 class TranslatedPageDisplayWidget(QWidget):
     def __init__(self, parent=None):
