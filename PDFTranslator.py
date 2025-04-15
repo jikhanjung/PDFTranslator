@@ -19,7 +19,8 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtGui import (
     QPixmap, QPainter, QColor, QTextCursor, QPen, QBrush, QImage, QFont, 
-    QFontMetrics, QCursor, QTextFormat, QTextCharFormat, QPalette, QPolygonF
+    QFontMetrics, QCursor, QTextFormat, QTextCharFormat, QPalette, QPolygonF,
+    QTextBlockFormat, QTextDocument
 )
 from PyQt5.QtCore import (
     Qt, QThread, pyqtSignal, QRectF, QSize, QTimer, QRect, QPoint, QSettings, QPointF
@@ -631,7 +632,7 @@ class PDFViewer(QMainWindow):
         self.line_spacing_spin = QDoubleSpinBox()
         self.line_spacing_spin.setRange(0.5, 3.0)
         self.line_spacing_spin.setSingleStep(0.1)
-        self.line_spacing_spin.setValue(1.0)  # Default to normal spacing
+        self.line_spacing_spin.setValue(self.settings.value("line_spacing", 1.0, type=float))  # Load saved value
         self.line_spacing_spin.setToolTip("Line spacing multiplier (0.5 to 3.0)")
         self.line_spacing_spin.valueChanged.connect(self.on_line_spacing_changed)
 
@@ -809,6 +810,10 @@ class PDFViewer(QMainWindow):
         debug_level = self.settings.value("debug_level", logging.INFO, int)
         logger.setLevel(debug_level)
         logger.debug(f"Debug level set to: {debug_level}")
+        
+        # Update line spacing control
+        line_spacing = self.settings.value("line_spacing", 1.0, type=float)
+        self.line_spacing_spin.setValue(line_spacing)
         
         # If we have an open document, update the interface
         if self.doc:
@@ -1186,6 +1191,7 @@ class PDFViewer(QMainWindow):
                 logger.debug(f"Setting page to translated_display: {self.current_page} with structure and translation {structure} {translation}")
                 self.translated_display.set_page(self.current_page, structure, translation)
             else:
+                self.translated_display.set_page(self.current_page, None, None)
                 logger.debug(f"No structure or translation found for page {self.current_page} {structure} {translation}")
             
             # Update button states
@@ -3436,10 +3442,13 @@ class TranslatedPageDisplayWidget(QWidget):
             if not hasattr(self, 'structure') or not hasattr(self, 'translation'):
                 logger.debug(f"No structure or translation found for page {self.current_page}")
                 return
+            if self.structure is None or self.translation is None:
+                logger.debug(f"No structure or translation found for page {self.current_page}")
+                return
 
             painter = QPainter(self)
             painter.setRenderHint(QPainter.Antialiasing)
-
+            
             # Clear the background
             painter.fillRect(self.rect(), Qt.white)
             
@@ -3500,14 +3509,30 @@ class TranslatedPageDisplayWidget(QWidget):
                     # Create font with scaled size
                     font = QFont()
                     font.setPointSizeF(scaled_font_size)
-                    painter.setFont(font)
                     
-                    # Calculate text rectangle with line spacing
-                    text_rect = QRectF(scaled_x0, scaled_y0, scaled_x1 - scaled_x0, scaled_y1 - scaled_y0)
-                    text_rect.setHeight(text_rect.height() * line_spacing)
+                    # Create QTextDocument for better text rendering
+                    doc = QTextDocument()
+                    doc.setDefaultFont(font)
+                    doc.setPlainText(translated_text)
                     
-                    # Draw translated text
-                    painter.drawText(text_rect, Qt.AlignLeft | Qt.AlignTop | Qt.TextWordWrap, translated_text)
+                    # Set line spacing using QTextBlockFormat
+                    cursor = QTextCursor(doc)
+                    cursor.select(QTextCursor.Document)
+                    format = QTextBlockFormat()
+                    # Convert line spacing multiplier to percentage (e.g., 1.0 -> 100%, 1.5 -> 150%)
+                    line_spacing_percent = int(line_spacing * 100)
+                    format.setLineHeight(line_spacing_percent, QTextBlockFormat.ProportionalHeight)
+                    cursor.mergeBlockFormat(format)
+                    
+                    # Set text width to enable word wrapping
+                    text_width = scaled_x1 - scaled_x0
+                    doc.setTextWidth(text_width)
+                    
+                    # Draw the document
+                    painter.save()
+                    painter.translate(scaled_x0, scaled_y0)
+                    doc.drawContents(painter, QRectF(0, 0, text_width, scaled_y1 - scaled_y0))
+                    painter.restore()
                     
         except Exception as e:
             logger.error(f"Error painting translated page: {str(e)}")
