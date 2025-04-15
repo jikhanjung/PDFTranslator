@@ -15,7 +15,7 @@ from PyQt5.QtWidgets import (
     QLabel, QTextEdit, QFileDialog, QComboBox, QCheckBox, QStatusBar, 
     QSplitter, QScrollArea, QLineEdit, QMessageBox, QDialog, QDialogButtonBox,
     QFormLayout, QTabWidget, QRadioButton, QButtonGroup, QSpinBox, QGroupBox,
-    QProgressBar, QSizePolicy, QMenu, QAction
+    QProgressBar, QSizePolicy, QMenu, QAction, QDoubleSpinBox
 )
 from PyQt5.QtGui import (
     QPixmap, QPainter, QColor, QTextCursor, QPen, QBrush, QImage, QFont, 
@@ -361,7 +361,7 @@ class TranslationProgressBar(QWidget):
         if page_num in self.translating_pages:
             self.translating_pages.remove(page_num)
         self.update()
-
+        
     def mark_page_structure(self, page_num):
         """Mark a page as translated"""
         self.structure_pages.add(page_num)
@@ -384,7 +384,7 @@ class TranslationProgressBar(QWidget):
         """Set the current page indicator"""
         self.current_page = page_num
         self.update()
-
+        
     def set_total_pages(self, total_pages):
         """Set the current page indicator"""
         self.total_pages = total_pages
@@ -520,7 +520,7 @@ class TranslationProgressBar(QWidget):
                 if i in self.translating_pages:
                     x = 1 + (i * block_width)
                     painter.fillRect(int(x), 1, int(block_width) + 1, height - 2, QColor(255, 215, 0))  # Gold/Yellow
-
+            
             # Draw the current page indicator with a blue border
             if 0 <= self.current_page < self.total_pages:
                 x = 1 + (self.current_page * block_width)
@@ -531,9 +531,9 @@ class TranslationProgressBar(QWidget):
 class PDFViewer(QMainWindow):
     def __init__(self):
         super().__init__()
-
+        
         global logger
-        logger = setup_logging()        
+        logger = setup_logging()
         # Initialize settings
         self.settings = QSettings("PDFTranslator", "Settings")
         
@@ -602,7 +602,7 @@ class PDFViewer(QMainWindow):
 
         # Connect the enter/return pressed signal
         self.page_input.returnPressed.connect(self.go_to_page)
-        
+
         # Add analyze button
         self.analyze_btn = QPushButton('Analyze')
         self.analyze_btn.clicked.connect(lambda: self.analyze_page(True))
@@ -616,6 +616,24 @@ class PDFViewer(QMainWindow):
         self.show_boxes_checkbox = QCheckBox("Show Bounding Boxes")
         self.show_boxes_checkbox.setChecked(True)
         self.show_boxes_checkbox.toggled.connect(self.pdf_display.toggle_bounding_boxes)
+
+        # Add text scale factor control
+        self.text_scale_label = QLabel("Text Scale:")
+        self.text_scale_spin = QDoubleSpinBox()
+        self.text_scale_spin.setRange(0.1, 2.0)
+        self.text_scale_spin.setSingleStep(0.1)
+        self.text_scale_spin.setValue(0.8)  # Default to 80%
+        self.text_scale_spin.setToolTip("Scale factor for translated text size (0.1 to 2.0)")
+        self.text_scale_spin.valueChanged.connect(self.on_text_scale_changed)
+
+        # Add line spacing control
+        self.line_spacing_label = QLabel("Line Spacing:")
+        self.line_spacing_spin = QDoubleSpinBox()
+        self.line_spacing_spin.setRange(0.5, 3.0)
+        self.line_spacing_spin.setSingleStep(0.1)
+        self.line_spacing_spin.setValue(1.0)  # Default to normal spacing
+        self.line_spacing_spin.setToolTip("Line spacing multiplier (0.5 to 3.0)")
+        self.line_spacing_spin.valueChanged.connect(self.on_line_spacing_changed)
 
         # Add translate button
         self.translate_btn = QPushButton('Translate')
@@ -656,6 +674,10 @@ class PDFViewer(QMainWindow):
         top_btn_layout.addWidget(self.analyze_btn)
         top_btn_layout.addWidget(self.analyze_all_btn)
         top_btn_layout.addWidget(self.show_boxes_checkbox)
+        top_btn_layout.addWidget(self.text_scale_label)
+        top_btn_layout.addWidget(self.text_scale_spin)
+        top_btn_layout.addWidget(self.line_spacing_label)
+        top_btn_layout.addWidget(self.line_spacing_spin)
         top_btn_layout.addWidget(self.translate_btn)
         top_btn_layout.addWidget(self.translate_all_btn)
         top_btn_layout.addWidget(self.export_btn)
@@ -933,7 +955,8 @@ class PDFViewer(QMainWindow):
                 'document_data': {
                     'page_structures': self.document_data['page_structures'],
                     'translations': translations_for_json,
-                    'metadata': self.document_data['metadata']
+                    'metadata': self.document_data['metadata'],
+                    'page_dimensions': self.document_data.get('page_dimensions', {})
                 },
                 'auto_translate': self.is_auto_translate_enabled(),
                 'look_ahead': self.is_look_ahead_enabled(),
@@ -1028,7 +1051,7 @@ class PDFViewer(QMainWindow):
                 else:
                     # Ask user to locate the PDF file
                     pdf_path, _ = QFileDialog.getOpenFileName(
-                        self, 
+                    self,
                         "Locate PDF File", 
                         session_dir, 
                         "PDF Files (*.pdf)"
@@ -1108,14 +1131,14 @@ class PDFViewer(QMainWindow):
             logger.error(f"Error loading session: {str(e)}")
             logger.error("Full error details:", exc_info=True)
             QMessageBox.warning(self, "Error", f"Failed to load session: {str(e)}")
-        
+    
     def update_page_display(self):
         """Update the PDF display and text areas with the current page content"""
         logger.debug(f"Updating page display: current page={self.current_page}")
         try:
             if self.doc is None:
                 return
-                
+            
             # Update PDF display
             page = self.doc.load_page(self.current_page)
             pixmap = page.get_pixmap(matrix=fitz.Matrix(4, 4))  # 2x zoom for better quality
@@ -1182,7 +1205,7 @@ class PDFViewer(QMainWindow):
             #if translation:
             #    self.translated_text.setVisible(True)
             #    self.translated_text.raise_()
-                
+            
         except Exception as e:
             logger.error(f"Error updating page display: {str(e)}")
             logger.error("Full error details:", exc_info=True)
@@ -1365,13 +1388,13 @@ class PDFViewer(QMainWindow):
                 # Worker is still running, don't start another one
                 logger.debug("Look-ahead translation already in progress")
                 return
-                
+        
             # Calculate the next page number
             next_page = self.current_page + 1
             if next_page >= len(self.doc):
                 # No next page
                 return
-                
+        
             # Get language settings from preferences
             input_lang_code = self.get_input_language()
             output_lang_code = self.get_output_language()
@@ -1436,19 +1459,19 @@ class PDFViewer(QMainWindow):
             self.look_ahead_worker = TranslationWorker(
                 text_to_translate,
                 next_page,
-                input_lang_code,
-                output_lang_code,
-                output_lang_name,
+            input_lang_code,
+            output_lang_code,
+            output_lang_name,
                 model
             )
             
             # Connect signals
             self.look_ahead_worker.translationComplete.connect(self.on_translation_complete)
-            
+        
             # Start the worker
             logger.debug(f"Starting look-ahead translation for page {next_page}")
             self.look_ahead_worker.start()
-            
+        
         except Exception as e:
             logger.error(f"Error in look-ahead translation: {str(e)}")
             logger.error("Full error details:", exc_info=True)
@@ -1595,14 +1618,9 @@ class PDFViewer(QMainWindow):
         # restore cursor
         QApplication.restoreOverrideCursor()
 
-
+    
     def analyze_page(self, force_new_analysis=True):
-        """Analyze current page using Upstage API"""
-        logger.info(f"Analyzing page {self.current_page + 1}")
-        # status label
-        self.status_label.showMessage(f"Analyzing page {self.current_page + 1}...", 3000)
-        QApplication.processEvents()  # Update UI immediately
-
+        """Analyze the current page using Upstage API"""
         # wait cursor
         QApplication.setOverrideCursor(QCursor(Qt.WaitCursor))
         try:
@@ -1633,6 +1651,58 @@ class PDFViewer(QMainWindow):
                 with open(temp_path, "rb") as img_file:
                     files = {"document": img_file}
                     result = self.upstage_client.post(url, files=files)
+                    
+                    # Get page dimensions in points and mm
+                    page_dims = self.document_data['page_dimensions'][str(self.current_page)]
+                    
+                    # Calculate conversion factors
+                    points_to_mm = 0.352778  # 1 point = 0.352778 mm
+                    page_width_mm = page_dims['points']['width'] * points_to_mm
+                    page_height_mm = page_dims['points']['height'] * points_to_mm
+                    
+                    # Calculate actual DPI based on page dimensions and image size
+                    # DPI = (pixels * 25.4) / (mm * 2)  # 2 is the zoom factor we used
+                    dpi_x = (pix.width * 25.4) / (page_width_mm * 2)
+                    dpi_y = (pix.height * 25.4) / (page_height_mm * 2)
+                    # Use average DPI
+                    dpi = (dpi_x + dpi_y) / 2
+                    logger.debug(f"Calculated DPI: {dpi:.2f} (x: {dpi_x:.2f}, y: {dpi_y:.2f})")
+                    
+                    # Process each text element to calculate relative sizes and extract point size
+                    if 'elements' in result:
+                        for element in result['elements']:
+                            if 'bbox' in element:
+                                # Get pixel dimensions from analysis
+                                px_width = element['bbox'][2] - element['bbox'][0]
+                                px_height = element['bbox'][3] - element['bbox'][1]
+                                
+                                # Calculate relative size in mm
+                                # Assuming the analysis image has the same aspect ratio as the PDF page
+                                rel_width_mm = (px_width / pix.width) * page_width_mm
+                                rel_height_mm = (px_height / pix.height) * page_height_mm
+                                
+                                # Extract point size from HTML attributes if available
+                                point_size = None
+                                if 'attributes' in element and 'style' in element['attributes']:
+                                    style = element['attributes']['style']
+                                    # Look for font-size in style attribute
+                                    import re
+                                    font_size_match = re.search(r'font-size:\s*(\d+)px', style)
+                                    if font_size_match:
+                                        px_size = float(font_size_match.group(1))
+                                        # Convert px to points using actual DPI
+                                        # 1 point = 1/72 inch, so px_size * (72/dpi) = points
+                                        point_size = px_size * (72 / dpi)
+                                
+                                # Store relative dimensions and point size
+                                element['relative_size'] = {
+                                    'width_mm': rel_width_mm,
+                                    'height_mm': rel_height_mm,
+                                    'width_pt': rel_width_mm / points_to_mm,
+                                    'height_pt': rel_height_mm / points_to_mm,
+                                    'point_size': point_size,  # Store the extracted point size
+                                    'dpi': dpi  # Store the calculated DPI for reference
+                                }
                     
                     # Store the analysis result in document_data
                     self.document_data['page_structures'][str(self.current_page)] = {
@@ -1859,7 +1929,7 @@ class PDFViewer(QMainWindow):
             if not os.getenv('OPENAI_API_KEY'):
                 if not self.request_api_key():
                     return
-                    
+                
             # Get the selected model from preferences
             model = self.get_model()
             
@@ -1906,24 +1976,24 @@ class PDFViewer(QMainWindow):
                 # Call OpenAI API directly
                 if is_new_version:
                     response = openai.chat.completions.create(
-                        model=model,
+                            model=model,
                         messages=messages,
-                        temperature=0.2,
+                            temperature=0.2,
                         max_tokens=2000
                     )
                     translated = response.choices[0].message.content.strip()
                 else:
                     response = openai.ChatCompletion.create(
-                        model=model,
+                            model=model,
                         messages=messages,
-                        temperature=0.2,
+                            temperature=0.2,
                         max_tokens=2000
                     )
                     translated = response.choices[0].message['content'].strip()
-                logger.debug(f"Translated text: {translated}")
-                
-                # Process the translation
-                self.on_translation_complete(translated, self.current_page, output_lang_name)
+                    logger.debug(f"Translated text: {translated}")
+                    
+                    # Process the translation
+                    self.on_translation_complete(translated, self.current_page, output_lang_name)
                 
             except Exception as e:
                 logger.error(f"Error in translation API call: {str(e)}")
@@ -2380,7 +2450,7 @@ class PDFViewer(QMainWindow):
                     self.analyze_page(page_num+1)
                 # translate page
                 self.translate_text(True)
-                
+
     def start_page_translation(self, page_num, input_lang_code, output_lang_code, output_lang_name, model):
         """Start translation for a specific page"""
         try:
@@ -2562,7 +2632,7 @@ class PDFViewer(QMainWindow):
         base_name = os.path.splitext(pdf_filename)[0]
         current_language = self.get_output_language_name()
         sanitized_language = current_language.replace(" ", "_").lower()
-
+        
         # Show file save dialog for the text file
         file_path, _ = QFileDialog.getSaveFileName(
             self, 
@@ -2572,7 +2642,7 @@ class PDFViewer(QMainWindow):
         )
             
 
-
+        
         if not file_path:
             return  # User canceled
         
@@ -2620,7 +2690,7 @@ class PDFViewer(QMainWindow):
                     # Skip untranslated pages
                     if cache_key not in self.document_data['translations']:
                         continue
-
+                    
                     # Write translated page with header
 
                     # Add translated content based on structure
@@ -2640,7 +2710,7 @@ class PDFViewer(QMainWindow):
                                 # Add the text content
                                 logger.debug(f"Adding text: {text} to page {i + 1}")
                                 f.write(text)
-                                f.write("\n\n")
+                    f.write("\n\n")
 
                     f.write(f"--- PAGE {i+1} ---\n\n\n\n")
                     #f.write("\n\n")
@@ -2676,15 +2746,15 @@ class PDFViewer(QMainWindow):
             current_language = self.get_output_language_name()
             sanitized_language = current_language.replace(" ", "_").lower()
             output_path, _ = QFileDialog.getSaveFileName(
-                self, 
+            self, 
                 "Save Translated PDF", 
                 f"{base_name}_{sanitized_language}.pdf", 
-                "PDF Files (*.pdf)"
-            )
-            
+            "PDF Files (*.pdf)"
+        )
+        
             if not output_path:
                 return
-                
+        
             # Show progress message
             self.status_label.showMessage(f"Exporting translations to PDF...")
             QApplication.processEvents()  # Update UI immediately
@@ -2800,7 +2870,7 @@ class PDFViewer(QMainWindow):
             
             if reply == QMessageBox.Yes:
                 self.open_exported_file(output_path)
-                
+            
         except Exception as e:
             logger.error(f"Error exporting PDF: {str(e)}")
             logger.error("Full error details:", exc_info=True)
@@ -2911,6 +2981,36 @@ class PDFViewer(QMainWindow):
             self.doc = fitz.open(file_path)
             self.current_page = 0
             
+            # Store page dimensions in document data
+            self.document_data['page_dimensions'] = {}
+            for i in range(len(self.doc)):
+                page = self.doc[i]
+                rect = page.rect
+                
+                # Convert points to millimeters (1 point = 0.352778 mm)
+                points_to_mm = 0.352778
+                
+                self.document_data['page_dimensions'][str(i)] = {
+                    # Points (original PDF units)
+                    'points': {
+                        'width': rect.width,
+                        'height': rect.height,
+                        'x0': rect.x0,
+                        'y0': rect.y0,
+                        'x1': rect.x1,
+                        'y1': rect.y1
+                    },
+                    # Millimeters (physical units)
+                    'mm': {
+                        'width': rect.width * points_to_mm,
+                        'height': rect.height * points_to_mm,
+                        'x0': rect.x0 * points_to_mm,
+                        'y0': rect.y0 * points_to_mm,
+                        'x1': rect.x1 * points_to_mm,
+                        'y1': rect.y1 * points_to_mm
+                    }
+                }
+            
             # Update page total label
             self.page_total.setText(f"/ {len(self.doc)}")
             self.translation_progress.set_total_pages(len(self.doc))
@@ -2985,6 +3085,22 @@ class PDFViewer(QMainWindow):
             logger.error(f"Error in on_view_tab_changed: {str(e)}")
             logger.error("Full error details:", exc_info=True)
             self.status_label.showMessage(f"Error changing view: {str(e)}", 3000)
+
+    def on_text_scale_changed(self, value):
+        """Handle text scale factor change"""
+        self.settings.setValue("text_scale", value)
+        self.settings.sync()
+        # Update the translated page display
+        if hasattr(self, 'translated_display'):
+            self.translated_display.update()
+
+    def on_line_spacing_changed(self, value):
+        """Handle line spacing change"""
+        self.settings.setValue("line_spacing", value)
+        self.settings.sync()
+        # Update the translated page display
+        if hasattr(self, 'translated_display'):
+            self.translated_display.update()
 
 class PDFDisplayWidget(QWidget):
     def __init__(self, parent=None):
@@ -3077,7 +3193,7 @@ class PDFDisplayWidget(QWidget):
         #logger.debug("Drawing bounding boxes")
         if not self.page_structure or 'structure' not in self.page_structure:
             #logger.debug("No structure or structure data found")
-            return
+                return
 
         structure_data = self.page_structure['structure']
         #logger.debug(f"Structure data: {structure_data}")
@@ -3143,7 +3259,7 @@ class PDFDisplayWidget(QWidget):
         # Positive delta => zoom in; negative => zoom out
         wheel_delta = event.angleDelta().y()
         if wheel_delta == 0:
-            return
+                    return
 
         # Choose a zoom step factor. Adjust to taste.
         zoom_step = 1.2 if wheel_delta > 0 else 1 / 1.2
@@ -3261,20 +3377,60 @@ class TranslatedPageDisplayWidget(QWidget):
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.background_color = QColor(255, 255, 255)  # White background
         self.text_color = QColor(0, 0, 0)  # Black text
+        self.pixmap = None
+        self.page_dims = None
 
     def set_page(self, page_num, structure, translation):
         """Set current page number, structure, and translation"""
-        
         self.current_page = page_num
         # Store in parent's document_data
         self.structure = structure
         logger.debug(f"Setting structure for page {self.current_page}: {self.structure}")
         self.translation = translation
         logger.debug(f"Setting translation for page {self.current_page}: {self.translation}")
+        
+        # Get the page dimensions from document data
+        main_window = self.window()
+        if hasattr(main_window, 'document_data'):
+            if 'page_dimensions' in main_window.document_data:
+                self.page_dims = main_window.document_data['page_dimensions'].get(str(page_num))
+                logger.debug(f"Page dimensions for page {page_num}: {self.page_dims}")
+
+            if not self.page_dims:
+                logger.warning(f"No page dimensions found for page {page_num}")
+                # Try to get dimensions from the PDF document
+                if hasattr(main_window, 'doc') and main_window.doc:
+                    try:
+                        page = main_window.doc[page_num]
+                        rect = page.rect
+                        points_to_mm = 0.352778  # 1 point = 0.352778 mm
+                        self.page_dims = {
+                            'points': {
+                                'width': rect.width,
+                                'height': rect.height,
+                                'x0': rect.x0,
+                                'y0': rect.y0,
+                                'x1': rect.x1,
+                                'y1': rect.y1
+                            },
+                            'mm': {
+                                'width': rect.width * points_to_mm,
+                                'height': rect.height * points_to_mm,
+                                'x0': rect.x0 * points_to_mm,
+                                'y0': rect.y0 * points_to_mm,
+                                'x1': rect.x1 * points_to_mm,
+                                'y1': rect.y1 * points_to_mm
+                            }
+                        }
+                        logger.debug(f"Retrieved page dimensions from PDF: {self.page_dims}")
+                    except Exception as e:
+                        logger.error(f"Error getting page dimensions from PDF: {str(e)}")
+        
         self.update()
 
     def paintEvent(self, event):
         """Paint the translated page with proper structure and text"""
+        logger.debug(f"Painting translated page {self.current_page}")
         painter = None
         try:
             if not hasattr(self, 'structure') or not hasattr(self, 'translation'):
@@ -3284,45 +3440,81 @@ class TranslatedPageDisplayWidget(QWidget):
             painter = QPainter(self)
             painter.setRenderHint(QPainter.Antialiasing)
 
-            # Fill background
-            painter.fillRect(self.rect(), self.background_color)
+            # Clear the background
+            painter.fillRect(self.rect(), Qt.white)
             
-            # Get the page structure and translation
+            if not self.structure or not self.translation:
+                logger.debug("No structure or translation to paint")
+                return
+                
             elements = self.structure['structure']['elements']
             translation = self.translation['structure']['elements']
+            logger.debug(f"translated page view Elements: {elements}")
+            logger.debug(f"translated page view Translation: {translation}")
             
-            # Set up the font for text
-            font = QFont()
-            font.setPointSize(11)  # Default font size
+            if not self.page_dims:
+                logger.warning("No page dimensions found")
+                return
+                
+            # Calculate scaling factors
+            page_width = self.page_dims['points']['width']
+            page_height = self.page_dims['points']['height']
             
-            # Draw each element with its translated text
-            for element in translation:
-                category = element.get('category', 'unknown')
-                coords = element.get('coordinates', [])
-                
-                if len(coords) >= 4:
-                    # Convert normalized coordinates to pixel coordinates
-                    x1 = int(coords[0]['x'] * self.width())
-                    y1 = int(coords[0]['y'] * self.height())
-                    x2 = int(coords[2]['x'] * self.width())
-                    y2 = int(coords[2]['y'] * self.height())
-                
-                    # Get the translated text for this element
-                    translated_text = element['content'].get('text','')
+            # Calculate scaling to fit page in widget while maintaining aspect ratio
+            scale_x = self.width() / page_width
+            scale_y = self.height() / page_height
+            scale = min(scale_x, scale_y)
+            
+            # Calculate offset to center the page
+            offset_x = (self.width() - (page_width * scale)) / 2
+            offset_y = (self.height() - (page_height * scale)) / 2
+            
+            # Get text scale factor and line spacing from settings
+            settings = QSettings("PDFTranslator", "Settings")
+            text_scale = settings.value("text_scale", 0.8, type=float)
+            line_spacing = settings.value("line_spacing", 1.0, type=float)
+            
+            # Draw each element with proper scaling
+            for orig_elem, trans_elem in zip(elements, translation):
+                logger.debug(f"Drawing element: {orig_elem} {trans_elem}")
+                if 'coordinates' in orig_elem and 'content' in trans_elem:
+                    # Get original bounding box coordinates
+                    coords = orig_elem['coordinates']
+                    # Get min and max x,y from the points
+                    x0 = min(point['x'] for point in coords) * page_width
+                    y0 = min(point['y'] for point in coords) * page_height
+                    x1 = max(point['x'] for point in coords) * page_width
+                    y1 = max(point['y'] for point in coords) * page_height
+                    translated_text = trans_elem['content']['text']
                     
-                    # Set up the text rectangle
-                    text_rect = QRectF(x1, y1, x2 - x1, y2 - y1)
+                    # Scale coordinates
+                    scaled_x0 = offset_x + (x0 * scale)
+                    scaled_y0 = offset_y + (y0 * scale)
+                    scaled_x1 = offset_x + (x1 * scale)
+                    scaled_y1 = offset_y + (y1 * scale)
                     
-                    # Draw the text
-                    painter.setPen(self.text_color)
+                    # Get original point size and calculate scaled size
+                    point_size = orig_elem.get('relative_size', {}).get('point_size', 12)
+                    scaled_font_size = point_size * scale * text_scale
+                    
+                    # Create font with scaled size
+                    font = QFont()
+                    font.setPointSizeF(scaled_font_size)
                     painter.setFont(font)
+                    
+                    # Calculate text rectangle with line spacing
+                    text_rect = QRectF(scaled_x0, scaled_y0, scaled_x1 - scaled_x0, scaled_y1 - scaled_y0)
+                    text_rect.setHeight(text_rect.height() * line_spacing)
+                    
+                    # Draw translated text
                     painter.drawText(text_rect, Qt.AlignLeft | Qt.AlignTop | Qt.TextWordWrap, translated_text)
-        
+                    
         except Exception as e:
-            logger.error(f"Error in paintEvent: {str(e)}")
-            logger.error("Full error details:", exc_info=True)
+            logger.error(f"Error painting translated page: {str(e)}")
+            if painter:
+                painter.end()
         finally:
-            if painter is not None:
+            if painter:
                 painter.end()
 
 class PreferencesDialog(QDialog):
@@ -3397,6 +3589,15 @@ class PreferencesDialog(QDialog):
         self.look_ahead_checkbox.setToolTip("Pre-translate next page in background")
         options_layout.addWidget(self.look_ahead_checkbox)
         
+        # Text scale factor
+        self.text_scale_spin = QDoubleSpinBox()
+        self.text_scale_spin.setRange(0.1, 2.0)
+        self.text_scale_spin.setSingleStep(0.1)
+        self.text_scale_spin.setValue(0.8)  # Default to 80%
+        self.text_scale_spin.setToolTip("Scale factor for translated text size (0.1 to 2.0)")
+        options_layout.addWidget(QLabel("Text Scale Factor:"))
+        options_layout.addWidget(self.text_scale_spin)
+        
         translation_layout.addWidget(options_group)
         
         # Add the translation tab
@@ -3411,49 +3612,33 @@ class PreferencesDialog(QDialog):
         debug_form = QFormLayout(debug_group)
         
         self.debug_level_combo = QComboBox()
-        self.debug_level_combo.addItem("Error", logging.ERROR)
-        self.debug_level_combo.addItem("Warning", logging.WARNING)
-        self.debug_level_combo.addItem("Info", logging.INFO)
-        self.debug_level_combo.addItem("Debug", logging.DEBUG)
-        debug_form.addRow("Log Level:", self.debug_level_combo)
+        self.debug_level_combo.addItem("DEBUG", logging.DEBUG)
+        self.debug_level_combo.addItem("INFO", logging.INFO)
+        self.debug_level_combo.addItem("WARNING", logging.WARNING)
+        self.debug_level_combo.addItem("ERROR", logging.ERROR)
+        debug_form.addRow("Debug Level:", self.debug_level_combo)
         
         debug_layout.addWidget(debug_group)
-        
-        # Add the debug tab
         tabs.addTab(debug_tab, "Debug")
         
-        # Add dialog buttons
-        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel | QDialogButtonBox.Apply)
-        button_box.accepted.connect(self.accept)
-        button_box.rejected.connect(self.reject)
-        button_box.button(QDialogButtonBox.Apply).clicked.connect(self.apply_settings)
-        layout.addWidget(button_box)
+        # Add buttons
+        button_layout = QHBoxLayout()
+        save_button = QPushButton("Save")
+        save_button.clicked.connect(self.save_settings)
+        cancel_button = QPushButton("Cancel")
+        cancel_button.clicked.connect(self.reject)
+        button_layout.addWidget(save_button)
+        button_layout.addWidget(cancel_button)
+        layout.addLayout(button_layout)
         
     def load_settings(self):
-        """Load settings from QSettings"""
-        # Language settings
-        input_lang = self.settings.value("input_language", "en", str)
-        for i in range(self.input_language_combo.count()):
-            if self.input_language_combo.itemData(i) == input_lang:
-                self.input_language_combo.setCurrentIndex(i)
-                break
-                
-        output_lang = self.settings.value("output_language", "ko", str)
-        for i in range(self.output_language_combo.count()):
-            if self.output_language_combo.itemData(i) == output_lang:
-                self.output_language_combo.setCurrentIndex(i)
-                break
-                
-        # Model setting
-        model = self.settings.value("model", "gpt-4o-mini", str)
-        for i in range(self.model_combo.count()):
-            if self.model_combo.itemData(i) == model:
-                self.model_combo.setCurrentIndex(i)
-                break
-                
-        # Translation options
+        """Load current settings from QSettings"""
+        self.input_language_combo.setCurrentText(self.settings.value("input_language_name", "English"))
+        self.output_language_combo.setCurrentText(self.settings.value("output_language_name", "Korean"))
+        self.model_combo.setCurrentText(self.settings.value("model_name", "GPT-3.5 Turbo"))
         self.auto_translate_checkbox.setChecked(self.settings.value("auto_translate", False, bool))
         self.look_ahead_checkbox.setChecked(self.settings.value("look_ahead", False, bool))
+        self.text_scale_spin.setValue(self.settings.value("text_scale", 0.8, float))
         
         # Debug level
         debug_level = self.settings.value("debug_level", logging.INFO, int)
@@ -3477,24 +3662,16 @@ class PreferencesDialog(QDialog):
         # Translation options
         self.settings.setValue("auto_translate", self.auto_translate_checkbox.isChecked())
         self.settings.setValue("look_ahead", self.look_ahead_checkbox.isChecked())
+        self.settings.setValue("text_scale", self.text_scale_spin.value())
         
         # Debug level
         self.settings.setValue("debug_level", self.debug_level_combo.currentData())
         
         # Sync settings to disk
         self.settings.sync()
-    
-    def apply_settings(self):
-        """Apply settings without closing the dialog"""
-        self.save_settings()
-        # Emit signal to notify the main window about changes
-        if hasattr(self.parent(), 'on_settings_changed'):
-            self.parent().on_settings_changed()
-    
-    def accept(self):
-        """Called when OK button is clicked"""
-        self.save_settings()
-        super().accept()
+        
+        # Close the dialog
+        self.accept()
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
