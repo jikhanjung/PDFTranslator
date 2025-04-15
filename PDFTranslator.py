@@ -798,6 +798,12 @@ class PDFViewer(QMainWindow):
         # Log the UI initialization
         logger.info("UI initialized")
         
+        # Connect zoom and pan signals between widgets
+        self.pdf_display.zoomChanged.connect(self.set_zoom)
+        self.pdf_display.panChanged.connect(self.set_pan)
+        self.translated_display.zoomChanged.connect(self.set_zoom)
+        self.translated_display.panChanged.connect(self.set_pan)
+        
     def show_preferences(self):
         """Show the preferences dialog"""
         dialog = PreferencesDialog(self)
@@ -3108,7 +3114,25 @@ class PDFViewer(QMainWindow):
         if hasattr(self, 'translated_display'):
             self.translated_display.update()
 
+    def set_zoom(self, zoom_factor):
+        """Set zoom factor for both widgets"""
+        self.pdf_display.zoom_factor = zoom_factor
+        self.translated_display.zoom_factor = zoom_factor
+        self.pdf_display.update()
+        self.translated_display.update()
+
+    def set_pan(self, pan_offset):
+        """Set pan offset for both widgets"""
+        self.pdf_display.pan_offset = pan_offset
+        self.translated_display.pan_offset = pan_offset
+        self.pdf_display.update()
+        self.translated_display.update()
+
 class PDFDisplayWidget(QWidget):
+    # Add signals for zoom and pan synchronization
+    zoomChanged = pyqtSignal(float)
+    panChanged = pyqtSignal(QPointF)
+    
     def __init__(self, parent=None):
         super().__init__(parent)
         self.pixmap = None
@@ -3338,6 +3362,10 @@ class PDFDisplayWidget(QWidget):
         # Update pan_offset
         self.pan_offset = QPointF(dx, dy)
 
+        # Emit signals for synchronization
+        self.zoomChanged.emit(self.zoom_factor)
+        self.panChanged.emit(self.pan_offset)
+
         self.update()
 
     def mousePressEvent(self, event):
@@ -3361,6 +3389,8 @@ class PDFDisplayWidget(QWidget):
 
             # Just shift pan_offset by the mouse delta
             self.pan_offset += delta
+            # Emit signal for synchronization
+            self.panChanged.emit(self.pan_offset)
             self.update()
         super().mouseMoveEvent(event)
 
@@ -3376,6 +3406,8 @@ class PDFDisplayWidget(QWidget):
 
 
 class TranslatedPageDisplayWidget(QWidget):
+    zoomChanged = pyqtSignal(float)
+    panChanged = pyqtSignal(QPointF)
     def __init__(self, parent=None):
         super().__init__(parent)
         self.current_page = 0
@@ -3608,6 +3640,10 @@ class TranslatedPageDisplayWidget(QWidget):
         dy = desired_top_left_y - new_y
         self.pan_offset = QPointF(dx, dy)
 
+        # Emit signals for synchronization
+        self.zoomChanged.emit(self.zoom_factor)
+        self.panChanged.emit(self.pan_offset)
+
         self.update()
 
     def mousePressEvent(self, event):
@@ -3625,6 +3661,8 @@ class TranslatedPageDisplayWidget(QWidget):
             delta = new_mouse_pos - self.last_mouse_pos
             self.last_mouse_pos = new_mouse_pos
             self.pan_offset += delta
+            # Emit signal for synchronization
+            self.panChanged.emit(self.pan_offset)
             self.update()
         super().mouseMoveEvent(event)
 
