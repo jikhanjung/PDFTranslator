@@ -1158,9 +1158,12 @@ class PDFViewer(QMainWindow):
                 self.structure_text.setText("Select 'Analyze' to analyze page structure")
             
             # Also update the translated page display if in that view
-            if self.view_tabs.currentIndex() == 1:  # Translated view tab
-                if structure and translation:
-                    self.translated_display.set_page(self.current_page, structure, translation)
+
+            if structure and translation:
+                logger.debug(f"Setting page to translated_display: {self.current_page} with structure and translation {structure} {translation}")
+                self.translated_display.set_page(self.current_page, structure, translation)
+            else:
+                logger.debug(f"No structure or translation found for page {self.current_page} {structure} {translation}")
             
             # Update button states
             self.update_buttons()
@@ -1176,9 +1179,9 @@ class PDFViewer(QMainWindow):
                 self.start_look_ahead_translation()
                 
             # Ensure translated text is visible if it exists
-            if translation:
-                self.translated_text.setVisible(True)
-                self.translated_text.raise_()
+            #if translation:
+            #    self.translated_text.setVisible(True)
+            #    self.translated_text.raise_()
                 
         except Exception as e:
             logger.error(f"Error updating page display: {str(e)}")
@@ -1750,12 +1753,12 @@ class PDFViewer(QMainWindow):
     def show_page_structure(self, result):
         """Display the page structure analysis results in a formatted way"""
         try:
-            logger.debug("Starting show_page_structure with result")
+            #logger.debug("Starting show_page_structure with result")
             
             display_text = "=== PAGE STRUCTURE ANALYSIS ===\n\n"
             
             if not result:
-                logger.debug("Result is None or empty")
+                #logger.debug("Result is None or empty")
                 display_text += "No analysis results available (empty result)."
                 self.structure_text.setText(display_text)
                 return
@@ -1803,8 +1806,8 @@ class PDFViewer(QMainWindow):
             if 'usage' in structure_data:
                 display_text += f"\nPages processed: {structure_data['usage'].get('pages', 1)}\n"
             
-            logger.debug("Final display text:")
-            logger.debug(display_text)
+            #logger.debug("Final display text:")
+            #logger.debug(display_text)
             
             # Update the structure text display
             self.structure_text.setText(display_text)
@@ -2990,139 +2993,6 @@ class PDFDisplayWidget(QWidget):
         self.current_page = None
         self.page_structure = None
         self.show_bounding_boxes = True
-        
-    def set_page(self, page_num, pixmap):
-        """Set the current page to display"""
-        self.current_page = page_num
-        self.pixmap = pixmap
-        
-        # Get the main window instance to access document data
-        main_window = self.window()
-        if hasattr(main_window, 'document_data'):
-            # Get the structure for the new page
-            structure = main_window.document_data['page_structures'].get(page_num)
-            logger.debug(f"Setting page {page_num} structure: {structure}")
-            if structure:
-                self.page_structure = structure
-            else:
-                self.page_structure = None
-                logger.debug(f"No structure found for page {page_num}")
-                
-        self.update()
-        
-    def set_page_structure(self, page_num, structure):
-        """Set the structure data for the current page"""
-        logger.debug(f"Setting page structure for page {page_num}: {structure}")
-        if page_num == self.current_page:
-            self.page_structure = structure
-            self.update()
-            
-    def toggle_bounding_boxes(self, state):
-        self.show_bounding_boxes = state
-        self.update()
-        
-    def paintEvent(self, event):
-        logger.debug("Painting event")
-        if self.pixmap is None:
-            return
-            
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
-        
-        # Calculate scaling to fit the widget
-        widget_size = self.size()
-        pixmap_size = self.pixmap.size()
-        
-        # Calculate the scaling factor to fit the pixmap within the widget
-        scale_x = widget_size.width() / pixmap_size.width()
-        scale_y = widget_size.height() / pixmap_size.height()
-        scale = min(scale_x, scale_y)
-        
-        # Calculate the position to center the scaled pixmap
-        scaled_width = pixmap_size.width() * scale
-        scaled_height = pixmap_size.height() * scale
-        x = (widget_size.width() - scaled_width) / 2
-        y = (widget_size.height() - scaled_height) / 2
-        
-        # Draw the scaled pixmap
-        painter.drawPixmap(QRectF(x, y, scaled_width, scaled_height), self.pixmap, QRectF(0, 0, pixmap_size.width(), pixmap_size.height()))
-        
-        # Draw bounding boxes if enabled and structure exists
-        logger.debug(f"Drawing bounding boxes: {self.show_bounding_boxes} and {self.page_structure}")
-        if self.show_bounding_boxes and self.page_structure:
-            self.draw_bounding_boxes(painter, x, y, scale)
-            
-        painter.end()
-        
-    def draw_bounding_boxes(self, painter, offset_x, offset_y, scale):
-        """Draw bounding boxes for page elements"""
-        logger.debug("Drawing bounding boxes")
-        if not self.page_structure or 'structure' not in self.page_structure:
-            logger.debug("No structure or structure data found")
-            return
-            
-        structure_data = self.page_structure['structure']
-        logger.debug(f"Structure data: {structure_data}")
-        if 'elements' not in structure_data:
-            logger.debug("No elements found in structure")
-            return
-            
-        logger.debug(f"Drawing bounding boxes for {len(structure_data['elements'])} elements")
-            
-        for element in structure_data['elements']:
-            if 'coordinates' not in element:
-                logger.debug("Element has no coordinates")
-                continue
-                
-            coords = element['coordinates']
-            category = element.get('category', 'unknown').lower()
-            logger.debug(f"Drawing box for {category} with coordinates: {coords}")
-            
-            # Set color based on category
-            alpha = 32
-            if category == 'header':
-                color = QColor(255, 0, 0, alpha)  # Red
-            elif category == 'heading1':
-                color = QColor(0, 255, 0, alpha)  # Green
-            elif category == 'paragraph':
-                color = QColor(0, 0, 255, alpha)  # Blue
-            elif category == 'footnote':
-                color = QColor(255, 255, 0, alpha)  # Yellow
-            elif category == 'footer':
-                color = QColor(255, 0, 255, alpha)  # Magenta
-            else:
-                color = QColor(128, 128, 128, alpha)  # Gray
-                
-            # Create polygon from coordinates
-            polygon = QPolygonF()
-            for point in coords:
-                # Scale and offset the coordinates
-                x = offset_x + (point['x'] * scale * self.pixmap.width())
-                y = offset_y + (point['y'] * scale * self.pixmap.height())
-                logger.debug(f"Point coordinates: x={x}, y={y}")
-                polygon.append(QPointF(x, y))
-                
-            # Draw the polygon
-            painter.setPen(QPen(color, 2))
-            painter.setBrush(QBrush(color))
-            painter.drawPolygon(polygon)
-            
-            # Draw category label
-            painter.setPen(QPen(QColor(0, 0, 0)))
-            if polygon.size() > 0:
-                first_point = polygon.at(0)
-                # Convert float coordinates to integers for drawText
-                x = int(first_point.x())
-                y = int(first_point.y() - 5)
-                painter.drawText(x, y, category)
-
-class PDFDisplayWidget(QWidget):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.pixmap = None
-        self.current_page = None
-        self.page_structure = None
-        self.show_bounding_boxes = True
 
         # ---- NEW FIELDS FOR ZOOM AND PAN ----
         self.zoom_factor = 1.0
@@ -3162,7 +3032,7 @@ class PDFDisplayWidget(QWidget):
         self.update()
 
     def paintEvent(self, event):
-        logger.debug("Painting event")
+        #logger.debug("Painting event")
         if self.pixmap is None:
             return
 
@@ -3196,7 +3066,7 @@ class PDFDisplayWidget(QWidget):
         )
 
         # Draw bounding boxes if enabled and structure exists
-        logger.debug(f"Drawing bounding boxes: {self.show_bounding_boxes} and {self.page_structure}")
+        #logger.debug(f"Drawing bounding boxes: {self.show_bounding_boxes} and {self.page_structure}")
         if self.show_bounding_boxes and self.page_structure:
             self.draw_bounding_boxes(painter, x, y, final_scale)
 
@@ -3204,27 +3074,27 @@ class PDFDisplayWidget(QWidget):
 
     def draw_bounding_boxes(self, painter, offset_x, offset_y, scale):
         """Draw bounding boxes for page elements"""
-        logger.debug("Drawing bounding boxes")
+        #logger.debug("Drawing bounding boxes")
         if not self.page_structure or 'structure' not in self.page_structure:
-            logger.debug("No structure or structure data found")
+            #logger.debug("No structure or structure data found")
             return
 
         structure_data = self.page_structure['structure']
-        logger.debug(f"Structure data: {structure_data}")
+        #logger.debug(f"Structure data: {structure_data}")
         if 'elements' not in structure_data:
-            logger.debug("No elements found in structure")
+            #logger.debug("No elements found in structure")
             return
 
-        logger.debug(f"Drawing bounding boxes for {len(structure_data['elements'])} elements")
+        #logger.debug(f"Drawing bounding boxes for {len(structure_data['elements'])} elements")
 
         for element in structure_data['elements']:
             if 'coordinates' not in element:
-                logger.debug("Element has no coordinates")
+                #logger.debug("Element has no coordinates")
                 continue
 
             coords = element['coordinates']
             category = element.get('category', 'unknown').lower()
-            logger.debug(f"Drawing box for {category} with coordinates: {coords}")
+            #logger.debug(f"Drawing box for {category} with coordinates: {coords}")
 
             # Set color based on category
             alpha = 32
@@ -3247,7 +3117,7 @@ class PDFDisplayWidget(QWidget):
                 # Scale and offset the coordinates
                 x = offset_x + (point['x'] * scale * self.pixmap.width())
                 y = offset_y + (point['y'] * scale * self.pixmap.height())
-                logger.debug(f"Point coordinates: x={x}, y={y}")
+                #logger.debug(f"Point coordinates: x={x}, y={y}")
                 polygon.append(QPointF(x, y))
 
             # Draw the polygon
@@ -3394,24 +3264,21 @@ class TranslatedPageDisplayWidget(QWidget):
 
     def set_page(self, page_num, structure, translation):
         """Set current page number, structure, and translation"""
+        
         self.current_page = page_num
         # Store in parent's document_data
-        if hasattr(self.parent(), 'document_data'):
-            if structure:
-                self.parent().document_data['page_structures'][page_num] = structure
-            if translation:
-                self.parent().document_data['translations'][page_num] = translation
+        self.structure = structure
+        logger.debug(f"Setting structure for page {self.current_page}: {self.structure}")
+        self.translation = translation
+        logger.debug(f"Setting translation for page {self.current_page}: {self.translation}")
         self.update()
 
     def paintEvent(self, event):
         """Paint the translated page with proper structure and text"""
         painter = None
         try:
-            if not hasattr(self.parent(), 'document_data'):
-                return
-
-            document_data = self.parent().document_data
-            if self.current_page not in document_data['page_structures'] or self.current_page not in document_data['translations']:
+            if not hasattr(self, 'structure') or not hasattr(self, 'translation'):
+                logger.debug(f"No structure or translation found for page {self.current_page}")
                 return
 
             painter = QPainter(self)
@@ -3421,41 +3288,35 @@ class TranslatedPageDisplayWidget(QWidget):
             painter.fillRect(self.rect(), self.background_color)
             
             # Get the page structure and translation
-            structure = document_data['page_structures'][self.current_page]
-            translation = document_data['translations'][self.current_page]
-            
-            if not isinstance(structure, dict) or 'structure' not in structure:
-                return
-                
-            analysis_result = structure['structure']
+            elements = self.structure['structure']['elements']
+            translation = self.translation['structure']['elements']
             
             # Set up the font for text
             font = QFont()
             font.setPointSize(11)  # Default font size
             
             # Draw each element with its translated text
-            if 'elements' in analysis_result:
-                for element in analysis_result['elements']:
-                    category = element.get('category', 'unknown')
-                    coords = element.get('coordinates', [])
+            for element in translation:
+                category = element.get('category', 'unknown')
+                coords = element.get('coordinates', [])
+                
+                if len(coords) >= 4:
+                    # Convert normalized coordinates to pixel coordinates
+                    x1 = int(coords[0]['x'] * self.width())
+                    y1 = int(coords[0]['y'] * self.height())
+                    x2 = int(coords[2]['x'] * self.width())
+                    y2 = int(coords[2]['y'] * self.height())
+                
+                    # Get the translated text for this element
+                    translated_text = element['content'].get('text','')
                     
-                    if len(coords) >= 4:
-                        # Convert normalized coordinates to pixel coordinates
-                        x1 = int(coords[0]['x'] * self.width())
-                        y1 = int(coords[0]['y'] * self.height())
-                        x2 = int(coords[2]['x'] * self.width())
-                        y2 = int(coords[2]['y'] * self.height())
+                    # Set up the text rectangle
+                    text_rect = QRectF(x1, y1, x2 - x1, y2 - y1)
                     
-                        # Get the translated text for this element
-                        translated_text = translation.get(category, '')
-                        
-                        # Set up the text rectangle
-                        text_rect = QRectF(x1, y1, x2 - x1, y2 - y1)
-                        
-                        # Draw the text
-                        painter.setPen(self.text_color)
-                        painter.setFont(font)
-                        painter.drawText(text_rect, Qt.AlignLeft | Qt.AlignTop | Qt.TextWordWrap, translated_text)
+                    # Draw the text
+                    painter.setPen(self.text_color)
+                    painter.setFont(font)
+                    painter.drawText(text_rect, Qt.AlignLeft | Qt.AlignTop | Qt.TextWordWrap, translated_text)
         
         except Exception as e:
             logger.error(f"Error in paintEvent: {str(e)}")
