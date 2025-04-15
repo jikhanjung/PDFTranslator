@@ -33,6 +33,10 @@ log_file = os.path.join('logs', f'pdf_translator_{datetime.datetime.now().strfti
 # Load environment variables for API keys
 load_dotenv()
 
+COMPANY_NAME = "PALEOBYTES"
+PROGRAM_NAME = "PDFTranslator"
+PROGRAM_VERSION = "0.0.3"
+
 # Set OpenAI API key the old way
 openai.api_key = os.getenv('OPENAI_API_KEY')
 system_prompt = """
@@ -553,7 +557,11 @@ class PDFViewer(QMainWindow):
         self.apply_settings()
         
     def init_ui(self):
-        self.setWindowTitle('PDF Translator')
+        #self.setWindowTitle('PDF Translator')
+
+        # Set window title
+        self.setWindowTitle(f"{PROGRAM_NAME} v{PROGRAM_VERSION}")
+
         self.setGeometry(100, 100, 1200, 800)  # Wider window for two panes
         
         # Create central widget and main layout
@@ -674,33 +682,23 @@ class PDFViewer(QMainWindow):
         
         self.structure_text = QTextEdit()
         self.structure_text.setReadOnly(True)
-        
+
+        # Create translated display widget
+        self.translated_display = TranslatedPageDisplayWidget()
+
         # Create tab widget for original text and structure
         left_tabs = QTabWidget()
         left_tabs.addTab(self.original_text, "Original Text")
         left_tabs.addTab(self.structure_text, "Structure")
-        
-        # Create translated display widget
-        self.translated_display = TranslatedPageDisplayWidget()
-        
-        # Create tabs for PDF view and translated view
-        self.view_tabs = QTabWidget()
-        self.view_tabs.addTab(self.pdf_display, "PDF View")
-        self.view_tabs.addTab(self.translated_display, "Translated View")
-        self.view_tabs.currentChanged.connect(self.on_view_tab_changed)
+        left_tabs.addTab(self.translated_text, "Translated Text")
+        left_tabs.addTab(self.translated_display, "Translated Page")        
         
         # Create a splitter for left and right panes
         display_splitter = QSplitter(Qt.Horizontal)
-        display_splitter.addWidget(self.view_tabs)
-        
-        # Create a splitter for text areas
-        text_splitter = QSplitter(Qt.Vertical)
-        text_splitter.addWidget(left_tabs)
-        text_splitter.addWidget(self.translated_text)
-        text_splitter.setSizes([300, 300])  # Set initial sizes
+        display_splitter.addWidget(self.pdf_display)
         
         # Add the text splitter to the display splitter
-        display_splitter.addWidget(text_splitter)
+        display_splitter.addWidget(left_tabs)
         display_splitter.setSizes([600, 600])  # Set initial sizes
         
         # Make splitter the central widget of the main splitter
@@ -959,6 +957,7 @@ class PDFViewer(QMainWindow):
             logger.error(f"Error saving session: {str(e)}")
             logger.error("Full error details:", exc_info=True)
 
+
     def load_session(self, session_file=None):
         """Load a previously saved session"""
         try:
@@ -1119,7 +1118,7 @@ class PDFViewer(QMainWindow):
                 
             # Update PDF display
             page = self.doc.load_page(self.current_page)
-            pixmap = page.get_pixmap(matrix=fitz.Matrix(2, 2))  # 2x zoom for better quality
+            pixmap = page.get_pixmap(matrix=fitz.Matrix(4, 4))  # 2x zoom for better quality
             image = QImage(pixmap.samples, pixmap.width, pixmap.height, pixmap.stride, QImage.Format_RGB888)
             self.pdf_display.set_page(self.current_page, QPixmap.fromImage(image))
             
@@ -1506,7 +1505,10 @@ class PDFViewer(QMainWindow):
                     "content": {
                         "html": text,
                         "text": text
-                    }
+                    },
+                    "id": element['id'],
+                    "page": page_num,
+                    "coordinates": element['coordinates']
                 }
 
                 translation['structure']['elements'].append(translated_element)
@@ -1584,6 +1586,7 @@ class PDFViewer(QMainWindow):
             else:
                 logger.info(f"Analyzing page {page_num+1}")
                 self.go_to_page(page_num+1)
+                self.update()
                 self.analyze_page(True)
         
         # restore cursor
@@ -1593,6 +1596,10 @@ class PDFViewer(QMainWindow):
     def analyze_page(self, force_new_analysis=True):
         """Analyze current page using Upstage API"""
         logger.info(f"Analyzing page {self.current_page + 1}")
+        # status label
+        self.status_label.showMessage(f"Analyzing page {self.current_page + 1}...", 3000)
+        QApplication.processEvents()  # Update UI immediately
+
         # wait cursor
         QApplication.setOverrideCursor(QCursor(Qt.WaitCursor))
         try:
@@ -2363,8 +2370,11 @@ class PDFViewer(QMainWindow):
             for page_num in pending_pages:
                 # show the page
                 self.go_to_page(page_num+1)
+                self.update()
                 # analyze page
-                self.analyze_page(page_num+1)
+                # if not analyzed, analyze page
+                if not self.document_data['page_structures'].get(str(page_num)):
+                    self.analyze_page(page_num+1)
                 # translate page
                 self.translate_text(True)
                 
@@ -2506,7 +2516,7 @@ class PDFViewer(QMainWindow):
         current_language = self.get_output_language_name()
         has_translations = False
         for key in self.document_data['translations']:
-            if key[1] == current_language:
+            if current_language in key:
                 has_translations = True
                 break
         
@@ -2544,15 +2554,22 @@ class PDFViewer(QMainWindow):
         """Export the translated document as a text file, skipping untranslated pages"""
         # Log export attempt
         logger.info("Text export initiated")
-        
+
+        pdf_filename = os.path.basename(self.current_file)
+        base_name = os.path.splitext(pdf_filename)[0]
+        current_language = self.get_output_language_name()
+        sanitized_language = current_language.replace(" ", "_").lower()
+
         # Show file save dialog for the text file
         file_path, _ = QFileDialog.getSaveFileName(
             self, 
             "Export Translation as Text", 
-            "", 
+            f"{base_name}_{sanitized_language}.txt", 
             "Text Files (*.txt)"
         )
-        
+            
+
+
         if not file_path:
             return  # User canceled
         
@@ -2573,7 +2590,8 @@ class PDFViewer(QMainWindow):
             translated_pages = 0
             translated_page_numbers = []
             for i in range(len(self.doc)):
-                if (i, current_language) in self.document_data['translations']:
+                key = f"{i}_{current_language}"
+                if key in self.document_data['translations']:
                     translated_pages += 1
                     translated_page_numbers.append(i + 1)  # Store 1-based page numbers
             
@@ -2585,7 +2603,7 @@ class PDFViewer(QMainWindow):
                 f.write(f"Total Document Pages: {len(self.doc)}\n")
                 f.write(f"Translated Pages: {translated_pages}\n")
                 f.write(f"Date: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-                f.write(f"Translated using: {self.model_combo.currentText()}\n")
+                f.write(f"Translated using: {self.get_model_name()}\n")
                 f.write("="*40 + "\n\n")
                 
                 # Write included page numbers
@@ -2594,17 +2612,36 @@ class PDFViewer(QMainWindow):
                 
                 # Write only translated pages
                 for i in range(len(self.doc)):
-                    cache_key = (i, current_language)
+                    cache_key = f"{i}_{current_language}"
                     
                     # Skip untranslated pages
                     if cache_key not in self.document_data['translations']:
                         continue
-                    
+
                     # Write translated page with header
-                    f.write(f"\n\n--- PAGE {i+1} ---\n\n")
-                    f.write(self.document_data['translations'][cache_key])
-                    f.write("\n\n")
-                    f.write("-"*40 + "\n")
+
+                    # Add translated content based on structure
+                    translation = self.document_data['translations'][cache_key]
+                    if isinstance(translation, dict) and 'structure' in translation:
+                        # Process structured translation
+                        for element in translation['structure']['elements']:
+                            category = element.get('category', 'unknown')
+                            content = element.get('content', {})
+                            text = content.get('text', '')
+                            
+                            if text:
+                                # Add category heading if it's meaningful
+                                #if category.lower() not in ['unknown', 'other']:
+                                #    y_pos = add_text(f"{category.upper()}", y_pos, fontsize=12, is_heading=True)
+                                
+                                # Add the text content
+                                logger.debug(f"Adding text: {text} to page {i + 1}")
+                                f.write(text)
+                                f.write("\n\n")
+
+                    f.write(f"--- PAGE {i+1} ---\n\n\n\n")
+                    #f.write("\n\n")
+                    #f.write("-"*40 + "\n")
             
             # Show success message
             self.status_label.showMessage(f"Export complete: {file_path}", 5000)
@@ -2659,7 +2696,7 @@ class PDFViewer(QMainWindow):
             translated_pages = 0
             translated_page_numbers = []
             for i in range(len(self.doc)):
-                cache_key = (i, current_language)
+                cache_key = f"{i}_{current_language}"
                 if cache_key in self.document_data['translations']:
                     translated_pages += 1
                     translated_page_numbers.append(i + 1)  # Store 1-based page numbers
@@ -2691,7 +2728,7 @@ class PDFViewer(QMainWindow):
             
             # Process each page
             for orig_page_num in range(len(self.doc)):
-                cache_key = (orig_page_num, current_language)
+                cache_key = f"{orig_page_num}_{current_language}"
                 
                 # Check if we have a translation for this page
                 if cache_key not in self.document_data['translations']:
@@ -2718,8 +2755,8 @@ class PDFViewer(QMainWindow):
                     # Calculate text width and wrap if needed
                     rect = fitz.Rect(72, y, output_page.rect.width - 72, y + 1000)
                     text_options = {"fontsize": fontsize}
-                    if is_heading:
-                        text_options["fontweight"] = "bold"
+                    #if is_heading:
+                    #    text_options["fontweight"] = "bold"
                     
                     # Insert text with wrapping
                     inserted_text = output_page.insert_textbox(rect, text, **text_options)
@@ -2737,10 +2774,11 @@ class PDFViewer(QMainWindow):
                         
                         if text:
                             # Add category heading if it's meaningful
-                            if category.lower() not in ['unknown', 'other']:
-                                y_pos = add_text(f"{category.upper()}", y_pos, fontsize=12, is_heading=True)
+                            #if category.lower() not in ['unknown', 'other']:
+                            #    y_pos = add_text(f"{category.upper()}", y_pos, fontsize=12, is_heading=True)
                             
                             # Add the text content
+                            logger.debug(f"Adding text: {text} to page {orig_page_num + 1}")
                             y_pos = add_text(text, y_pos)
                 else:
                     # Process plain text translation
@@ -2872,6 +2910,10 @@ class PDFViewer(QMainWindow):
             
             # Update page total label
             self.page_total.setText(f"/ {len(self.doc)}")
+            self.translation_progress.set_total_pages(len(self.doc))
+            self.translation_progress.set_current_page(self.current_page)
+            self.translation_progress.update()
+
             
             # Clear translation cache when opening a new document
             self.document_data['translations'] = {}
@@ -2914,6 +2956,7 @@ class PDFViewer(QMainWindow):
                     self.structure_text.setText("Select 'Analyze' to analyze page structure")
             else:
                 # Initialize text areas with current page content
+                self.save_session()
                 self.extract_text()  # This will update the original text area
                 current_language = self.get_output_language_name()
                 self.translated_text.setText("Select 'Translate' to translate to " + current_language)
@@ -3608,5 +3651,5 @@ Requirements:
 - keyring
 
 Build command:
-pyinstaller --name "PDFTranslator_v0.0.2.exe" --onefile --noconsole PDFTranslator.py
+pyinstaller --name "PDFTranslator_v0.0.3.exe" --onefile --noconsole PDFTranslator.py
 '''
