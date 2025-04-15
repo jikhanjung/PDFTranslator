@@ -3385,6 +3385,12 @@ class TranslatedPageDisplayWidget(QWidget):
         self.text_color = QColor(0, 0, 0)  # Black text
         self.pixmap = None
         self.page_dims = None
+        
+        # Add zoom and pan fields
+        self.zoom_factor = 1.0
+        self.pan_offset = QPointF(0, 0)
+        self.is_panning = False
+        self.last_mouse_pos = QPointF(0, 0)
 
     def set_page(self, page_num, structure, translation):
         """Set current page number, structure, and translation"""
@@ -3469,14 +3475,19 @@ class TranslatedPageDisplayWidget(QWidget):
             page_width = self.page_dims['points']['width']
             page_height = self.page_dims['points']['height']
             
-            # Calculate scaling to fit page in widget while maintaining aspect ratio
+            # Calculate base scaling to fit page in widget while maintaining aspect ratio
             scale_x = self.width() / page_width
             scale_y = self.height() / page_height
-            scale = min(scale_x, scale_y)
+            base_scale = min(scale_x, scale_y)
             
-            # Calculate offset to center the page
-            offset_x = (self.width() - (page_width * scale)) / 2
-            offset_y = (self.height() - (page_height * scale)) / 2
+            # Apply zoom factor
+            final_scale = base_scale * self.zoom_factor
+            
+            # Calculate offset to center the page, then apply pan offset
+            scaled_width = page_width * final_scale
+            scaled_height = page_height * final_scale
+            offset_x = (self.width() - scaled_width) / 2 + self.pan_offset.x()
+            offset_y = (self.height() - scaled_height) / 2 + self.pan_offset.y()
             
             # Get text scale factor and line spacing from settings
             settings = QSettings("PDFTranslator", "Settings")
@@ -3496,15 +3507,15 @@ class TranslatedPageDisplayWidget(QWidget):
                     y1 = max(point['y'] for point in coords) * page_height
                     translated_text = trans_elem['content']['text']
                     
-                    # Scale coordinates
-                    scaled_x0 = offset_x + (x0 * scale)
-                    scaled_y0 = offset_y + (y0 * scale)
-                    scaled_x1 = offset_x + (x1 * scale)
-                    scaled_y1 = offset_y + (y1 * scale)
+                    # Scale coordinates with zoom and pan
+                    scaled_x0 = offset_x + (x0 * final_scale)
+                    scaled_y0 = offset_y + (y0 * final_scale)
+                    scaled_x1 = offset_x + (x1 * final_scale)
+                    scaled_y1 = offset_y + (y1 * final_scale)
                     
                     # Get original point size and calculate scaled size
                     point_size = orig_elem.get('relative_size', {}).get('point_size', 12)
-                    scaled_font_size = point_size * scale * text_scale
+                    scaled_font_size = point_size * final_scale * text_scale
                     
                     # Create font with scaled size
                     font = QFont()
@@ -3541,6 +3552,88 @@ class TranslatedPageDisplayWidget(QWidget):
         finally:
             if painter:
                 painter.end()
+
+    def wheelEvent(self, event):
+        """Handle zoom in/out with mouse wheel"""
+        wheel_delta = event.angleDelta().y()
+        if wheel_delta == 0:
+            return
+
+        # Choose a zoom step factor
+        zoom_step = 1.2 if wheel_delta > 0 else 1 / 1.2
+        
+        # The position of the cursor in widget coordinates
+        cursor_pos = event.position()
+        cursor_point = QPointF(cursor_pos.x(), cursor_pos.y())
+
+        # Compute the old scene coordinates (before zoom)
+        widget_size = self.size()
+        page_width = self.page_dims['points']['width']
+        page_height = self.page_dims['points']['height']
+        
+        scale_x = widget_size.width() / page_width
+        scale_y = widget_size.height() / page_height
+        base_scale = min(scale_x, scale_y)
+        
+        old_final_scale = base_scale * self.zoom_factor
+        
+        # The current top-left after pan offset
+        current_width = page_width * old_final_scale
+        current_height = page_height * old_final_scale
+        current_x = (widget_size.width() - current_width) / 2 + self.pan_offset.x()
+        current_y = (widget_size.height() - current_height) / 2 + self.pan_offset.y()
+
+        # Convert cursor position to "scene" coords
+        scene_x = (cursor_point.x() - current_x) / old_final_scale
+        scene_y = (cursor_point.y() - current_y) / old_final_scale
+
+        # Adjust the zoom factor
+        self.zoom_factor *= zoom_step
+        self.zoom_factor = max(0.1, min(self.zoom_factor, 10.0))
+
+        # After changing zoom_factor, compute new final scale
+        new_final_scale = base_scale * self.zoom_factor
+        new_width = page_width * new_final_scale
+        new_height = page_height * new_final_scale
+        new_x = (widget_size.width() - new_width) / 2
+        new_y = (widget_size.height() - new_height) / 2
+
+        # Recompute what top-left would have to be so that
+        # (scene_x, scene_y) is still under cursor_point
+        desired_top_left_x = cursor_point.x() - scene_x * new_final_scale
+        desired_top_left_y = cursor_point.y() - scene_y * new_final_scale
+
+        # Update pan_offset
+        dx = desired_top_left_x - new_x
+        dy = desired_top_left_y - new_y
+        self.pan_offset = QPointF(dx, dy)
+
+        self.update()
+
+    def mousePressEvent(self, event):
+        """Start panning when the user presses the left mouse button"""
+        if event.button() == Qt.LeftButton:
+            self.is_panning = True
+            self.last_mouse_pos = event.pos()
+            self.setCursor(Qt.ClosedHandCursor)
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        """If panning is active, update the pan_offset"""
+        if self.is_panning:
+            new_mouse_pos = event.pos()
+            delta = new_mouse_pos - self.last_mouse_pos
+            self.last_mouse_pos = new_mouse_pos
+            self.pan_offset += delta
+            self.update()
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        """Stop panning on left button release"""
+        if event.button() == Qt.LeftButton:
+            self.is_panning = False
+            self.setCursor(Qt.ArrowCursor)
+        super().mouseReleaseEvent(event)
 
 class PreferencesDialog(QDialog):
     """Dialog for application preferences"""
