@@ -15,7 +15,7 @@ from PyQt5.QtWidgets import (
     QLabel, QTextEdit, QFileDialog, QComboBox, QCheckBox, QStatusBar, 
     QSplitter, QScrollArea, QLineEdit, QMessageBox, QDialog, QDialogButtonBox,
     QFormLayout, QTabWidget, QRadioButton, QButtonGroup, QSpinBox, QGroupBox,
-    QProgressBar, QSizePolicy, QMenu, QAction, QDoubleSpinBox
+    QProgressBar, QSizePolicy, QMenu, QAction, QDoubleSpinBox, QInputDialog
 )
 from PyQt5.QtGui import (
     QPixmap, QPainter, QColor, QTextCursor, QPen, QBrush, QImage, QFont, 
@@ -368,7 +368,7 @@ class TranslationProgressBar(QWidget):
         self.structure_pages.add(page_num)
         logger.debug(f"Marked page {page_num} as structure analyzed")
         self.update()
-
+        
     def mark_page_translating(self, page_num):
         """Mark a page as currently being translated"""
         if page_num not in self.translated_pages:  # Only mark as translating if not already translated
@@ -390,7 +390,7 @@ class TranslationProgressBar(QWidget):
         """Set the current page indicator"""
         self.total_pages = total_pages
         self.update()
-
+        
     def clear(self):
         """Reset the progress bar"""
         self.total_pages = 0
@@ -1471,9 +1471,9 @@ class PDFViewer(QMainWindow):
             self.look_ahead_worker = TranslationWorker(
                 text_to_translate,
                 next_page,
-            input_lang_code,
-            output_lang_code,
-            output_lang_name,
+                input_lang_code,
+                output_lang_code,
+                output_lang_name,
                 model
             )
             
@@ -1988,24 +1988,24 @@ class PDFViewer(QMainWindow):
                 # Call OpenAI API directly
                 if is_new_version:
                     response = openai.chat.completions.create(
-                            model=model,
+                                model=model,
                         messages=messages,
-                            temperature=0.2,
+                                temperature=0.2,
                         max_tokens=2000
                     )
                     translated = response.choices[0].message.content.strip()
                 else:
                     response = openai.ChatCompletion.create(
-                            model=model,
+                                model=model,
                         messages=messages,
-                            temperature=0.2,
+                                temperature=0.2,
                         max_tokens=2000
                     )
                     translated = response.choices[0].message['content'].strip()
                     logger.debug(f"Translated text: {translated}")
                     
-                    # Process the translation
-                    self.on_translation_complete(translated, self.current_page, output_lang_name)
+                # Process the translation
+                self.on_translation_complete(translated, self.current_page, output_lang_name)
                 
             except Exception as e:
                 logger.error(f"Error in translation API call: {str(e)}")
@@ -2758,11 +2758,11 @@ class PDFViewer(QMainWindow):
             current_language = self.get_output_language_name()
             sanitized_language = current_language.replace(" ", "_").lower()
             output_path, _ = QFileDialog.getSaveFileName(
-            self, 
+                self, 
                 "Save Translated PDF", 
                 f"{base_name}_{sanitized_language}.pdf", 
-            "PDF Files (*.pdf)"
-        )
+                "PDF Files (*.pdf)"
+            )
         
             if not output_path:
                 return
@@ -2808,80 +2808,134 @@ class PDFViewer(QMainWindow):
             # Add horizontal line
             page.draw_line((72, 200), (page.rect.width - 72, 200))
             
-            # Create a font for text
-            font_size = 10
-            
-            # Process each page
-            for orig_page_num in range(len(self.doc)):
-                cache_key = f"{orig_page_num}_{current_language}"
-                
-                # Check if we have a translation for this page
+            # For each page in the document
+            for i in range(len(self.doc)):
+                # Skip pages that haven't been translated
+                cache_key = f"{i}_{current_language}"
                 if cache_key not in self.document_data['translations']:
                     continue
                 
-                # Get the translated content
+                # Get the translated content and structure
                 translation = self.document_data['translations'][cache_key]
+                structure = self.document_data['page_structures'].get(str(i))
                 
-                # Create a new page in the output PDF
-                output_page = doc.new_page()
+                if not structure or not isinstance(translation, dict) or 'structure' not in translation:
+                    continue
                 
-                # Set page header with original page number
-                header_text = f"Original Page: {orig_page_num + 1} - Language: {current_language}"
-                output_page.insert_text((72, 36), header_text, fontsize=8)
+                # Create a new page for this translated content
+                page = doc.new_page()
                 
-                # Draw a line under the header
-                output_page.draw_line((72, 48), (output_page.rect.width - 72, 48))
+                # Add page header
+                page.insert_text((72, 36), f"Original Page {i+1}", fontsize=8)
                 
-                # Start position for content
-                y_pos = 72
+                # Add horizontal line
+                page.draw_line((72, 48), (page.rect.width - 72, 48))
                 
-                # Helper function to add formatted text
-                def add_text(text, y, fontsize=10, is_heading=False):
-                    # Calculate text width and wrap if needed
-                    rect = fitz.Rect(72, y, output_page.rect.width - 72, y + 1000)
-                    text_options = {"fontsize": fontsize}
-                    #if is_heading:
-                    #    text_options["fontweight"] = "bold"
+                # Get page dimensions
+                page_dims = self.document_data['page_dimensions'].get(str(i))
+                if not page_dims:
+                    continue
                     
-                    # Insert text with wrapping
-                    inserted_text = output_page.insert_textbox(rect, text, **text_options)
-                    
-                    # Return the new y position after the text
-                    return y + inserted_text + 10  # Add a small spacing after each paragraph
+                # Get original page dimensions
+                orig_width = page_dims['points']['width']
+                orig_height = page_dims['points']['height']
                 
-                # Add translated content based on structure
-                if isinstance(translation, dict) and 'structure' in translation:
-                    # Process structured translation
-                    for element in translation['structure']['elements']:
-                        category = element.get('category', 'unknown')
-                        content = element.get('content', {})
-                        text = content.get('text', '')
+                # Get A4 page dimensions (in points, 1 point = 1/72 inch)
+                # A4 is 595 x 842 points
+                a4_width = 595
+                a4_height = 842
+                
+                # Define margins (in points)
+                margin = 72  # 1 inch margin
+                
+                # Calculate available space
+                available_width = a4_width - (2 * margin)
+                available_height = a4_height - (2 * margin) - 48  # Account for header
+                
+                # Calculate scaling factors for width and height
+                width_scale = available_width / orig_width
+                height_scale = available_height / orig_height
+                
+                # Use the smaller scaling factor to maintain aspect ratio
+                scale = min(width_scale, height_scale)
+                
+                # Calculate the actual dimensions after scaling
+                scaled_width = orig_width * scale
+                scaled_height = orig_height * scale
+                
+                # Calculate the position to center the content
+                x_offset = margin + (available_width - scaled_width) / 2
+                y_offset = margin + 48 + (available_height - scaled_height) / 2  # Account for header
+                
+                # Get text scale factor from settings and apply additional scaling for PDF
+                settings = QSettings("PDFTranslator", "Settings")
+                text_scale = settings.value("text_scale", 0.8, type=float)
+                # Apply additional scaling for PDF to make text larger
+                pdf_scale_factor = 1.5  # Additional scaling factor for PDF
+                
+                # Process each element with its original position
+                elements = structure['structure']['elements']
+                translation_elements = translation['structure']['elements']
+                
+                try:
+                    # Try to use malgunGothic for better CJK support if available
+                    font_path = "C:/Windows/Fonts/malgun.ttf"
+                    fontname = page.insert_font(fontname="MalgunGothic", fontfile=font_path)
+                    has_korean_font = True
+                except Exception:
+                    has_korean_font = False
+                
+                for orig_elem, trans_elem in zip(elements, translation_elements):
+                    if 'coordinates' in orig_elem and 'content' in trans_elem:
+                        # Get original bounding box coordinates and scale them
+                        coords = orig_elem['coordinates']
+                        # Get min and max x,y from the points and apply scaling and offset
+                        x0 = min(point['x'] for point in coords) * orig_width * scale + x_offset
+                        y0 = min(point['y'] for point in coords) * orig_height * scale + y_offset
+                        x1 = max(point['x'] for point in coords) * orig_width * scale + x_offset
+                        y1 = max(point['y'] for point in coords) * orig_height * scale + y_offset
                         
-                        if text:
-                            # Add category heading if it's meaningful
-                            #if category.lower() not in ['unknown', 'other']:
-                            #    y_pos = add_text(f"{category.upper()}", y_pos, fontsize=12, is_heading=True)
-                            
-                            # Add the text content
-                            logger.debug(f"Adding text: {text} to page {orig_page_num + 1}")
-                            y_pos = add_text(text, y_pos)
-                else:
-                    # Process plain text translation
-                    y_pos = add_text(str(translation), y_pos)
+                        # Get the translated text
+                        translated_text = trans_elem['content']['text']
+                        
+                        # Get original point size and calculate scaled size
+                        point_size = orig_elem.get('relative_size', {}).get('point_size', 12)
+                        # Apply both text scale and PDF scale factor
+                        scaled_font_size = point_size * text_scale * pdf_scale_factor * scale
+                        
+                        # Create text rectangle for this element
+                        text_rect = fitz.Rect(x0, y0, x1, y1)
+                        
+                        # Draw bounding box first (so it's behind the text)
+                        page.draw_rect(text_rect, color=(0, 0, 1), width=0.5)  # Blue rectangle with 0.5pt width
+                        
+                        try:
+                            if has_korean_font:
+                                # Use MalgunGothic font
+                                page.insert_textbox(
+                                    text_rect,
+                                    translated_text,
+                                    fontname="MalgunGothic",
+                                    fontsize=scaled_font_size,
+                                    align=0
+                                )
+                            else:
+                                # Fall back to default font
+                                page.insert_textbox(
+                                    text_rect,
+                                    translated_text,
+                                    fontsize=scaled_font_size,
+                                    align=0
+                                )
+                        except Exception as e:
+                            logger.error(f"Error inserting text: {str(e)}")
             
             # Save the document
             doc.save(output_path)
             doc.close()
             
             self.status_label.showMessage(f"Translation exported to {output_path}", 5000)
-            
-            # Ask if user wants to open the exported file
-            reply = QMessageBox.question(self, 'Open File', 
-                'Export completed. Do you want to open the file now?',
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
-            
-            if reply == QMessageBox.Yes:
-                self.open_exported_file(output_path)
+            self.open_exported_file(output_path)
             
         except Exception as e:
             logger.error(f"Error exporting PDF: {str(e)}")
@@ -3486,7 +3540,7 @@ class TranslatedPageDisplayWidget(QWidget):
 
             painter = QPainter(self)
             painter.setRenderHint(QPainter.Antialiasing)
-            
+
             # Clear the background
             painter.fillRect(self.rect(), Qt.white)
             
