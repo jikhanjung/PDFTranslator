@@ -2594,13 +2594,12 @@ class PDFViewer(QMainWindow):
                 self.translation_progress.mark_page_translated(i)
 
     def export_translation(self):
-        """Export the translated document as a text or PDF file"""
+        """Export the translated document with format selection and PDF options"""
         # Check if we have a document
         if not self.doc:
             return
         
         # Check if we have any translations in the cache
-        #current_language = self.output_language_combo.currentText()
         current_language = self.get_output_language_name()
         has_translations = False
         for key in self.document_data['translations']:
@@ -2616,27 +2615,61 @@ class PDFViewer(QMainWindow):
             )
             return
         
-        # Ask user for export format with clearer options
-        dialog = QMessageBox(self)
-        dialog.setWindowTitle("Choose Export Format")
-        dialog.setText("Select the format to export the translated document:")
-        dialog.setIcon(QMessageBox.Question)
+        # Create a custom dialog for export options
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Export Options")
+        dialog.setModal(True)
+        layout = QVBoxLayout()
         
-        # Create specific buttons for each format
-        txt_button = dialog.addButton("Export as Text (.txt)", QMessageBox.ActionRole)
-        pdf_button = dialog.addButton("Export as PDF (.pdf)", QMessageBox.ActionRole)
-        cancel_button = dialog.addButton(QMessageBox.Cancel)
+        # Format selection group
+        format_group = QGroupBox("Export Format")
+        format_layout = QVBoxLayout()
         
-        dialog.exec_()
+        txt_radio = QRadioButton("Text File (.txt)")
+        pdf_radio = QRadioButton("PDF File (.pdf)")
+        txt_radio.setChecked(True)  # Default to text format
         
-        # Check which button was clicked
-        clicked_button = dialog.clickedButton()
+        format_layout.addWidget(txt_radio)
+        format_layout.addWidget(pdf_radio)
+        format_group.setLayout(format_layout)
+        layout.addWidget(format_group)
         
-        if clicked_button == txt_button:
-            self.export_as_text()
-        elif clicked_button == pdf_button:
-            self.export_as_pdf()
-        # If cancel was clicked, do nothing
+        # PDF options group (initially hidden)
+        pdf_options_group = QGroupBox("PDF Options")
+        pdf_options_layout = QVBoxLayout()
+        
+        translated_only_radio = QRadioButton("Translated pages only")
+        alternating_pages_radio = QRadioButton("Alternating original and translated pages")
+        translated_only_radio.setChecked(True)  # Default to translated only
+        
+        pdf_options_layout.addWidget(translated_only_radio)
+        pdf_options_layout.addWidget(alternating_pages_radio)
+        pdf_options_group.setLayout(pdf_options_layout)
+        pdf_options_group.setVisible(False)
+        layout.addWidget(pdf_options_group)
+        
+        # Button box
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        button_box.accepted.connect(dialog.accept)
+        button_box.rejected.connect(dialog.reject)
+        layout.addWidget(button_box)
+        
+        dialog.setLayout(layout)
+        
+        # Connect format radio buttons to show/hide PDF options
+        def on_format_changed():
+            pdf_options_group.setVisible(pdf_radio.isChecked())
+            dialog.adjustSize()  # Adjust dialog size when showing/hiding options
+        
+        txt_radio.toggled.connect(on_format_changed)
+        pdf_radio.toggled.connect(on_format_changed)
+        
+        # Show dialog and handle result
+        if dialog.exec_() == QDialog.Accepted:
+            if txt_radio.isChecked():
+                self.export_as_text()
+            else:  # PDF format
+                self.export_as_pdf(alternating_pages_radio.isChecked())
 
     def export_as_text(self):
         """Export the translated document as a text file, skipping untranslated pages"""
@@ -2750,7 +2783,7 @@ class PDFViewer(QMainWindow):
             )
             self.status_label.showMessage(f"Export failed: {str(e)}", 5000)
 
-    def export_as_pdf(self):
+    def export_as_pdf(self, include_original_pages=False):
         """Export the translated document as a PDF file"""
         try:
             if not self.doc:
@@ -2802,6 +2835,10 @@ class PDFViewer(QMainWindow):
             Included pages: {', '.join(map(str, translated_page_numbers))}
             """
             
+            if include_original_pages:
+                cover_text += "\nNote: Pages are arranged with original page on the left and its translation on the right."
+                cover_text += "\nFor best viewing experience, use two-page spread layout in your PDF viewer."
+            
             # Insert cover text with proper spacing
             text_lines = cover_text.split('\n')
             y_pos = 72
@@ -2812,6 +2849,19 @@ class PDFViewer(QMainWindow):
             # Add horizontal line
             page.draw_line((72, 200), (page.rect.width - 72, 200))
             
+            # If using alternating pages, add a blank page after cover
+            # This ensures original pages appear on the left and translations on the right
+            # when viewing in two-page spread layout
+            if include_original_pages:
+                blank_page = doc.new_page()
+                # Add a small note at the bottom of the blank page
+                blank_page.insert_text(
+                    (72, blank_page.rect.height - 50),
+                    "This page is intentionally left blank to enable two-page spread viewing.",
+                    fontsize=10,
+                    color=(0.5, 0.5, 0.5)  # Gray color
+                )
+            
             # For each page in the document
             for i in range(len(self.doc)):
                 # Skip pages that haven't been translated
@@ -2819,23 +2869,38 @@ class PDFViewer(QMainWindow):
                 if cache_key not in self.document_data['translations']:
                     continue
                 
-                # Get the translated content and structure
+                # Insert original page if option is selected
+                if include_original_pages:
+                    original_page = self.doc[i]
+                    new_page = doc.new_page()
+                    new_page.show_pdf_page(
+                        new_page.rect,
+                        self.doc,
+                        i,
+                        clip=original_page.rect
+                    )
+                    
+                    # Add page header for original
+                    new_page.insert_text((72, 36), f"Original Page {i+1}", fontsize=8)
+                    new_page.draw_line((72, 48), (new_page.rect.width - 72, 48))
+                
+                # Create the translated page
                 translation = self.document_data['translations'][cache_key]
                 structure = self.document_data['page_structures'].get(str(i))
                 
                 if not structure or not isinstance(translation, dict) or 'structure' not in translation:
                     continue
                 
-                # Create a new page for this translated content
+                # Create a new page for the translation
                 page = doc.new_page()
                 
-                # Add page header
-                page.insert_text((72, 36), f"Original Page {i+1}", fontsize=8)
-                
-                # Add horizontal line
+                # Add page header for translation
+                header_text = f"Translation of Page {i+1}" if include_original_pages else f"Page {i+1} Translation"
+                page.insert_text((72, 36), f"{header_text} ({current_language})", fontsize=8)
                 page.draw_line((72, 48), (page.rect.width - 72, 48))
                 
-                # Get page dimensions
+                # ... (rest of the existing page creation code remains the same)
+                # Get page dimensions and calculate scaling
                 page_dims = self.document_data['page_dimensions'].get(str(i))
                 if not page_dims:
                     continue
@@ -2844,78 +2909,63 @@ class PDFViewer(QMainWindow):
                 orig_width = page_dims['points']['width']
                 orig_height = page_dims['points']['height']
                 
-                # Get A4 page dimensions (in points, 1 point = 1/72 inch)
-                # A4 is 595 x 842 points
+                # Get A4 page dimensions (in points)
                 a4_width = 595
                 a4_height = 842
                 
-                # Define margins (in points)
+                # Define margins
                 margin = 72  # 1 inch margin
                 
                 # Calculate available space
                 available_width = a4_width - (2 * margin)
-                available_height = a4_height - (2 * margin) - 48  # Account for header
+                available_height = a4_height - (2 * margin) - 48
                 
-                # Calculate scaling factors for width and height
+                # Calculate scaling factors
                 width_scale = available_width / orig_width
                 height_scale = available_height / orig_height
-                
-                # Use the smaller scaling factor to maintain aspect ratio
                 scale = min(width_scale, height_scale)
                 
-                # Calculate the actual dimensions after scaling
+                # Calculate dimensions and position
                 scaled_width = orig_width * scale
                 scaled_height = orig_height * scale
-                
-                # Calculate the position to center the content
                 x_offset = margin + (available_width - scaled_width) / 2
-                y_offset = margin + 48 + (available_height - scaled_height) / 2  # Account for header
+                y_offset = margin + 48 + (available_height - scaled_height) / 2
                 
-                # Get text scale factor from settings and apply additional scaling for PDF
+                # Get text scale settings
                 settings = QSettings("PDFTranslator", "Settings")
                 text_scale = settings.value("text_scale", 0.8, type=float)
-                # Apply additional scaling for PDF to make text larger
-                pdf_scale_factor = 1.5  # Additional scaling factor for PDF
+                pdf_scale_factor = 1.5
                 
-                # Process each element with its original position
-                elements = structure['structure']['elements']
-                translation_elements = translation['structure']['elements']
-                
+                # Try to use Korean font if available
                 try:
-                    # Try to use malgunGothic for better CJK support if available
                     font_path = "C:/Windows/Fonts/malgun.ttf"
                     fontname = page.insert_font(fontname="MalgunGothic", fontfile=font_path)
                     has_korean_font = True
                 except Exception:
                     has_korean_font = False
                 
+                # Process each element with translation
+                elements = structure['structure']['elements']
+                translation_elements = translation['structure']['elements']
+                
                 for orig_elem, trans_elem in zip(elements, translation_elements):
                     if 'coordinates' in orig_elem and 'content' in trans_elem:
-                        # Get original bounding box coordinates and scale them
+                        # Calculate coordinates and insert text
                         coords = orig_elem['coordinates']
-                        # Get min and max x,y from the points and apply scaling and offset
                         x0 = min(point['x'] for point in coords) * orig_width * scale + x_offset
                         y0 = min(point['y'] for point in coords) * orig_height * scale + y_offset
                         x1 = max(point['x'] for point in coords) * orig_width * scale + x_offset
                         y1 = max(point['y'] for point in coords) * orig_height * scale + y_offset
                         
-                        # Get the translated text
                         translated_text = trans_elem['content']['text']
-                        
-                        # Get original point size and calculate scaled size
                         point_size = orig_elem.get('relative_size', {}).get('point_size', 12)
-                        # Apply both text scale and PDF scale factor
                         scaled_font_size = point_size * text_scale * pdf_scale_factor * scale
                         
-                        # Create text rectangle for this element
                         text_rect = fitz.Rect(x0, y0, x1, y1)
-                        
-                        # Draw bounding box first (so it's behind the text)
-                        page.draw_rect(text_rect, color=(0, 0, 1), width=0.5)  # Blue rectangle with 0.5pt width
+                        page.draw_rect(text_rect, color=(0, 0, 1), width=0.5)
                         
                         try:
                             if has_korean_font:
-                                # Use MalgunGothic font
                                 page.insert_textbox(
                                     text_rect,
                                     translated_text,
@@ -2924,7 +2974,6 @@ class PDFViewer(QMainWindow):
                                     align=0
                                 )
                             else:
-                                # Fall back to default font
                                 page.insert_textbox(
                                     text_rect,
                                     translated_text,
@@ -3093,6 +3142,7 @@ class PDFViewer(QMainWindow):
             # Clear translation cache when opening a new document
             self.document_data['translations'] = {}
             self.document_data['page_structures'] = {}
+            self.document_data['metadata'] = {}
             
             # Reset detected language when opening a new PDF
             self.detected_language = None
@@ -3895,5 +3945,5 @@ Requirements:
 - keyring
 
 Build command:
-pyinstaller --name "PDFTranslator_v0.0.3.exe" --onefile --noconsole PDFTranslator.py
+pyinstaller --name "PDFTranslator_v0.0.3_20250416.exe" --onefile --noconsole PDFTranslator.py
 '''
