@@ -623,7 +623,9 @@ class PDFViewer(QMainWindow):
         self.text_scale_spin = QDoubleSpinBox()
         self.text_scale_spin.setRange(0.1, 2.0)
         self.text_scale_spin.setSingleStep(0.1)
-        self.text_scale_spin.setValue(0.8)  # Default to 80%
+        #self.text_scale_spin.setValue(0.8)  # Default to 80%
+        # read from settings
+        self.text_scale_spin.setValue(self.settings.value("text_scale", 0.8, float))
         self.text_scale_spin.setToolTip("Scale factor for translated text size (0.1 to 2.0)")
         self.text_scale_spin.valueChanged.connect(self.on_text_scale_changed)
 
@@ -1181,7 +1183,7 @@ class PDFViewer(QMainWindow):
                 self.display_translation(translation)
             else:
                 self.translated_text.clear()
-                self.translated_text.setText("Select 'Translate' to translate to " + current_language)
+                self.translated_text.setText("Click 'Translate' button to translate to " + current_language)
             
             # Update structure text if available
             structure = self.get_page_structure(self.current_page)
@@ -1189,7 +1191,7 @@ class PDFViewer(QMainWindow):
                 # Display structure in the structure text area
                 self.show_page_structure(structure)
             else:
-                self.structure_text.setText("Select 'Analyze' to analyze page structure")
+                self.structure_text.setText("Click 'Analyze' button to analyze page structure")
             
             # Also update the translated page display if in that view
 
@@ -1557,6 +1559,7 @@ class PDFViewer(QMainWindow):
             self.document_data['translations'][cache_key] = translation
             
             # Update UI
+            self.update_page_display()
             self.display_translation(translation)
             self.translation_progress.mark_page_translated(page_num)
             self.status_label.showMessage(f"Translation completed for page {page_num + 1}", 3000)
@@ -2573,7 +2576,7 @@ class PDFViewer(QMainWindow):
             self.translated_text.setText(self.document_data['translations'][cache_key])
         else:
             # Clear and indicate translation is needed
-            self.translated_text.setText("Select 'Translate' to translate to " + language_name)
+            self.translated_text.setText("Click 'Translate' button to translate to " + language_name)
 
     def refresh_progress_bar(self):
         """Refresh the progress bar to show translations for current output language"""
@@ -2722,7 +2725,8 @@ class PDFViewer(QMainWindow):
                                 # Add the text content
                                 logger.debug(f"Adding text: {text} to page {i + 1}")
                                 f.write(text)
-                    f.write("\n\n")
+                                f.write("\n\n")
+                    
 
                     f.write(f"--- PAGE {i+1} ---\n\n\n\n")
                     #f.write("\n\n")
@@ -3026,6 +3030,8 @@ class PDFViewer(QMainWindow):
             # Store the current PDF path
             self.current_pdf_path = file_path
             self.current_file = os.path.abspath(file_path)
+            self.document_data = {}
+
             
             # Log the file opening
             logger.info(f"Opening PDF: {os.path.basename(file_path)}")
@@ -3086,6 +3092,7 @@ class PDFViewer(QMainWindow):
             
             # Clear translation cache when opening a new document
             self.document_data['translations'] = {}
+            self.document_data['page_structures'] = {}
             
             # Reset detected language when opening a new PDF
             self.detected_language = None
@@ -3121,15 +3128,15 @@ class PDFViewer(QMainWindow):
                     # Initialize text areas with current page content
                     self.extract_text()  # This will update the original text area
                     current_language = self.get_output_language_name()
-                    self.translated_text.setText("Select 'Translate' to translate to " + current_language)
-                    self.structure_text.setText("Select 'Analyze' to analyze page structure")
+                    self.translated_text.setText("Click 'Translate' button to translate to " + current_language)
+                    self.structure_text.setText("Click 'Analyze' button to analyze page structure")
             else:
                 # Initialize text areas with current page content
                 self.save_session()
                 self.extract_text()  # This will update the original text area
                 current_language = self.get_output_language_name()
-                self.translated_text.setText("Select 'Translate' to translate to " + current_language)
-                self.structure_text.setText("Select 'Analyze' to analyze page structure")
+                self.translated_text.setText("Click 'Translate' button to translate to " + current_language)
+                self.structure_text.setText("Click 'Analyze' button to analyze page structure")
 
     def on_view_tab_changed(self, index):
         """Handle tab change between PDF view and translated view"""
@@ -3799,15 +3806,6 @@ class PreferencesDialog(QDialog):
         self.look_ahead_checkbox.setToolTip("Pre-translate next page in background")
         options_layout.addWidget(self.look_ahead_checkbox)
         
-        # Text scale factor
-        self.text_scale_spin = QDoubleSpinBox()
-        self.text_scale_spin.setRange(0.1, 2.0)
-        self.text_scale_spin.setSingleStep(0.1)
-        self.text_scale_spin.setValue(0.8)  # Default to 80%
-        self.text_scale_spin.setToolTip("Scale factor for translated text size (0.1 to 2.0)")
-        options_layout.addWidget(QLabel("Text Scale Factor:"))
-        options_layout.addWidget(self.text_scale_spin)
-        
         translation_layout.addWidget(options_group)
         
         # Add the translation tab
@@ -3845,10 +3843,9 @@ class PreferencesDialog(QDialog):
         """Load current settings from QSettings"""
         self.input_language_combo.setCurrentText(self.settings.value("input_language_name", "English"))
         self.output_language_combo.setCurrentText(self.settings.value("output_language_name", "Korean"))
-        self.model_combo.setCurrentText(self.settings.value("model_name", "GPT-3.5 Turbo"))
+        self.model_combo.setCurrentText(self.settings.value("model_name", "GPT-4o mini"))
         self.auto_translate_checkbox.setChecked(self.settings.value("auto_translate", False, bool))
         self.look_ahead_checkbox.setChecked(self.settings.value("look_ahead", False, bool))
-        self.text_scale_spin.setValue(self.settings.value("text_scale", 0.8, float))
         
         # Debug level
         debug_level = self.settings.value("debug_level", logging.INFO, int)
@@ -3872,7 +3869,6 @@ class PreferencesDialog(QDialog):
         # Translation options
         self.settings.setValue("auto_translate", self.auto_translate_checkbox.isChecked())
         self.settings.setValue("look_ahead", self.look_ahead_checkbox.isChecked())
-        self.settings.setValue("text_scale", self.text_scale_spin.value())
         
         # Debug level
         self.settings.setValue("debug_level", self.debug_level_combo.currentData())
