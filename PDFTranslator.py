@@ -1687,38 +1687,40 @@ class PDFViewer(QMainWindow):
                     # Process each text element to calculate relative sizes and extract point size
                     if 'elements' in result:
                         for element in result['elements']:
-                            if 'bbox' in element:
-                                # Get pixel dimensions from analysis
-                                px_width = element['bbox'][2] - element['bbox'][0]
-                                px_height = element['bbox'][3] - element['bbox'][1]
+                            if 'content' in element and 'html' in element['content']:
+                                html_content = element['content']['html']
                                 
-                                # Calculate relative size in mm
-                                # Assuming the analysis image has the same aspect ratio as the PDF page
-                                rel_width_mm = (px_width / pix.width) * page_width_mm
-                                rel_height_mm = (px_height / pix.height) * page_height_mm
-                                
-                                # Extract point size from HTML attributes if available
+                                # Extract point size from HTML style attribute
                                 point_size = None
-                                if 'attributes' in element and 'style' in element['attributes']:
-                                    style = element['attributes']['style']
-                                    # Look for font-size in style attribute
-                                    import re
+                                style_match = re.search(r'style=[\'"](.*?)[\'"]', html_content)
+                                if style_match:
+                                    style = style_match.group(1)
                                     font_size_match = re.search(r'font-size:\s*(\d+)px', style)
                                     if font_size_match:
                                         px_size = float(font_size_match.group(1))
-                                        # Convert px to points using actual DPI
-                                        # 1 point = 1/72 inch, so px_size * (72/dpi) = points
-                                        point_size = px_size * (72 / dpi)
-                                
-                                # Store relative dimensions and point size
-                                element['relative_size'] = {
-                                    'width_mm': rel_width_mm,
-                                    'height_mm': rel_height_mm,
-                                    'width_pt': rel_width_mm / points_to_mm,
-                                    'height_pt': rel_height_mm / points_to_mm,
-                                    'point_size': point_size,  # Store the extracted point size
-                                    'dpi': dpi  # Store the calculated DPI for reference
-                                }
+                                        # Convert px to points (1 point = 1/72 inch)
+                                        point_size = px_size * (72 / 96)  # Assuming standard 96 DPI for web
+
+                                # Get coordinates for relative positioning
+                                if 'coordinates' in element:
+                                    x_coords = [point['x'] for point in element['coordinates']]
+                                    y_coords = [point['y'] for point in element['coordinates']]
+                                    rel_width = max(x_coords) - min(x_coords)
+                                    rel_height = max(y_coords) - min(y_coords)
+                                    
+                                    # Calculate dimensions in mm
+                                    rel_width_mm = rel_width * page_width_mm
+                                    rel_height_mm = rel_height * page_height_mm
+
+                                    # Store relative dimensions and point size
+                                    element['relative_size'] = {
+                                        'width_mm': rel_width_mm,
+                                        'height_mm': rel_height_mm,
+                                        'width_pt': rel_width_mm / points_to_mm,
+                                        'height_pt': rel_height_mm / points_to_mm,
+                                        'point_size': point_size,
+                                        'dpi': 96  # Using standard web DPI
+                                    }
                     
                     # Store the analysis result in document_data
                     self.document_data['page_structures'][str(self.current_page)] = {
@@ -1827,7 +1829,8 @@ class PDFViewer(QMainWindow):
                         painter.drawText(label_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, category)
                         
             finally:
-                painter.end()
+                if painter:
+                    painter.end()
                 
             return pixmap
                 
@@ -1992,21 +1995,26 @@ class PDFViewer(QMainWindow):
                 # Call OpenAI API directly
                 if is_new_version:
                     response = openai.chat.completions.create(
-                                model=model,
+                        model=model,
                         messages=messages,
-                                temperature=0.2,
+                        temperature=0.2,
                         max_tokens=2000
                     )
                     translated = response.choices[0].message.content.strip()
                 else:
                     response = openai.ChatCompletion.create(
-                                model=model,
+                        model=model,
                         messages=messages,
-                                temperature=0.2,
+                        temperature=0.2,
                         max_tokens=2000
                     )
-                    translated = response.choices[0].message['content'].strip()
-                    logger.debug(f"Translated text: {translated}")
+                #logger.debug(f"Response: {response}")
+                #logger.debug(f"Response choices: {response.choices}")
+                #logger.debug(f"Response choices[0]: {response.choices[0]}")
+                #logger.debug(f"Response choices[0].message: {response.choices[0].message}")
+                #logger.debug(f"Response choices[0].message.content: {response.choices[0].message.content}")
+                translated = response.choices[0].message.content.strip()
+                logger.debug(f"Translated text: {translated}")
                     
                 # Process the translation
                 self.on_translation_complete(translated, self.current_page, output_lang_name)
@@ -2759,7 +2767,7 @@ class PDFViewer(QMainWindow):
                                 # Add the text content
                                 logger.debug(f"Adding text: {text} to page {i + 1}")
                                 f.write(text)
-                                f.write("\n\n")
+                    f.write("\n\n")
                     
 
                     f.write(f"--- PAGE {i+1} ---\n\n\n\n")
@@ -3327,8 +3335,8 @@ class PDFDisplayWidget(QWidget):
         #logger.debug(f"Drawing bounding boxes: {self.show_bounding_boxes} and {self.page_structure}")
         if self.show_bounding_boxes and self.page_structure:
             self.draw_bounding_boxes(painter, x, y, final_scale)
-
-        painter.end()
+        if painter:
+            painter.end()
 
     def draw_bounding_boxes(self, painter, offset_x, offset_y, scale):
         """Draw bounding boxes for page elements"""
@@ -3601,38 +3609,49 @@ class TranslatedPageDisplayWidget(QWidget):
 
             # Clear the background
             painter.fillRect(self.rect(), Qt.white)
-            
+
             if not self.structure or not self.translation:
                 logger.debug("No structure or translation to paint")
                 return
-                
+
             elements = self.structure['structure']['elements']
             translation = self.translation['structure']['elements']
-            logger.debug(f"translated page view Elements: {elements}")
-            logger.debug(f"translated page view Translation: {translation}")
-            
+
             if not self.page_dims:
                 logger.warning("No page dimensions found")
                 return
-                
+
             # Calculate scaling factors
             page_width = self.page_dims['points']['width']
             page_height = self.page_dims['points']['height']
             
-            # Calculate base scaling to fit page in widget while maintaining aspect ratio
+            # Calculate scale to fit
             scale_x = self.width() / page_width
             scale_y = self.height() / page_height
-            base_scale = min(scale_x, scale_y)
-            
-            # Apply zoom factor
-            final_scale = base_scale * self.zoom_factor
-            
-            # Calculate offset to center the page, then apply pan offset
-            scaled_width = page_width * final_scale
-            scaled_height = page_height * final_scale
-            offset_x = (self.width() - scaled_width) / 2 + self.pan_offset.x()
-            offset_y = (self.height() - scaled_height) / 2 + self.pan_offset.y()
-            
+            scale = min(scale_x, scale_y) * self.zoom_factor
+
+            # Calculate offsets to center the content
+            offset_x = (self.width() - (page_width * scale)) / 2 + self.pan_offset.x()
+            offset_y = (self.height() - (page_height * scale)) / 2 + self.pan_offset.y()
+
+            # Draw bounding boxes first
+            pen = QPen(QColor(0, 0, 255, 128))  # Semi-transparent blue
+            pen.setWidth(1)
+            painter.setPen(pen)
+
+            for element in elements:
+                if 'coordinates' in element:
+                    coords = element['coordinates']
+                    x0 = min(point['x'] for point in coords) * page_width * scale + offset_x
+                    y0 = min(point['y'] for point in coords) * page_height * scale + offset_y
+                    x1 = max(point['x'] for point in coords) * page_width * scale + offset_x
+                    y1 = max(point['y'] for point in coords) * page_height * scale + offset_y
+                    
+                    rect = QRectF(x0, y0, x1 - x0, y1 - y0)
+                    painter.drawRect(rect)
+
+            # Continue with existing text drawing code...
+
             # Get text scale factor and line spacing from settings
             settings = QSettings("PDFTranslator", "Settings")
             text_scale = settings.value("text_scale", 0.8, type=float)
@@ -3652,14 +3671,14 @@ class TranslatedPageDisplayWidget(QWidget):
                     translated_text = trans_elem['content']['text']
                     
                     # Scale coordinates with zoom and pan
-                    scaled_x0 = offset_x + (x0 * final_scale)
-                    scaled_y0 = offset_y + (y0 * final_scale)
-                    scaled_x1 = offset_x + (x1 * final_scale)
-                    scaled_y1 = offset_y + (y1 * final_scale)
+                    scaled_x0 = offset_x + (x0 * scale)
+                    scaled_y0 = offset_y + (y0 * scale)
+                    scaled_x1 = offset_x + (x1 * scale)
+                    scaled_y1 = offset_y + (y1 * scale)
                     
                     # Get original point size and calculate scaled size
                     point_size = orig_elem.get('relative_size', {}).get('point_size', 12)
-                    scaled_font_size = point_size * final_scale * text_scale
+                    scaled_font_size = point_size * scale * text_scale
                     
                     # Create font with scaled size
                     font = QFont()
