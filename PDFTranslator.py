@@ -2919,26 +2919,30 @@ class PDFViewer(QMainWindow):
                 orig_height = page_dims['points']['height']
                 
                 # Get A4 page dimensions (in points)
-                a4_width = 595
-                a4_height = 842
-                
-                # Define margins
-                margin = 72  # 1 inch margin
-                
+                a4_width = 595  # A4 width in points
+                a4_height = 842  # A4 height in points
+
+                # Define margins (in points)
+                margin = 30  # Reduced from 72 (1 inch) to 50 points for more space
+
                 # Calculate available space
                 available_width = a4_width - (2 * margin)
-                available_height = a4_height - (2 * margin) - 48
+                available_height = a4_height - (2 * margin) 
                 
-                # Calculate scaling factors
+                # Calculate scaling factors for width and height
                 width_scale = available_width / orig_width
                 height_scale = available_height / orig_height
+
+                # Use the smaller scaling factor to maintain aspect ratio
                 scale = min(width_scale, height_scale)
-                
-                # Calculate dimensions and position
+
+                # Calculate the actual dimensions after scaling
                 scaled_width = orig_width * scale
                 scaled_height = orig_height * scale
+
+                # Calculate the position to center the content
                 x_offset = margin + (available_width - scaled_width) / 2
-                y_offset = margin + 48 + (available_height - scaled_height) / 2
+                y_offset = margin + (available_height - scaled_height) / 2
                 
                 # Get text scale settings
                 settings = QSettings("PDFTranslator", "Settings")
@@ -2971,7 +2975,7 @@ class PDFViewer(QMainWindow):
                         scaled_font_size = point_size * text_scale * pdf_scale_factor * scale
                         
                         text_rect = fitz.Rect(x0, y0, x1, y1)
-                        page.draw_rect(text_rect, color=(0, 0, 1), width=0.5)
+                        #page.draw_rect(text_rect, color=(0, 0, 1), width=0.5)
                         
                         try:
                             if has_korean_font:
