@@ -602,7 +602,7 @@ class PDFViewer(QMainWindow):
         page_layout.addWidget(self.page_total)
 
         # Connect the enter/return pressed signal
-        self.page_input.returnPressed.connect(self.go_to_page)
+        self.page_input.returnPressed.connect(lambda: self.go_to_page(self.page_input.text()))
 
         # Add analyze button
         self.analyze_btn = QPushButton('Analyze')
@@ -2008,12 +2008,12 @@ class PDFViewer(QMainWindow):
                         temperature=0.2,
                         max_tokens=2000
                     )
-                #logger.debug(f"Response: {response}")
-                #logger.debug(f"Response choices: {response.choices}")
-                #logger.debug(f"Response choices[0]: {response.choices[0]}")
-                #logger.debug(f"Response choices[0].message: {response.choices[0].message}")
-                #logger.debug(f"Response choices[0].message.content: {response.choices[0].message.content}")
-                translated = response.choices[0].message.content.strip()
+                    #logger.debug(f"Response: {response}")
+                    #logger.debug(f"Response choices: {response.choices}")
+                    #logger.debug(f"Response choices[0]: {response.choices[0]}")
+                    #logger.debug(f"Response choices[0].message: {response.choices[0].message}")
+                    #logger.debug(f"Response choices[0].message.content: {response.choices[0].message.content}")
+                    translated = response.choices[0].message['content'].strip()
                 logger.debug(f"Translated text: {translated}")
                     
                 # Process the translation
