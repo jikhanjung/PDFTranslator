@@ -9,6 +9,7 @@ import json
 import logging
 import keyring
 import httpx
+import requests
 from dotenv import load_dotenv
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
@@ -613,6 +614,10 @@ class PDFViewer(QMainWindow):
         self.analyze_all_btn.clicked.connect(lambda: self.analyze_all(True))
         self.analyze_all_btn.setEnabled(False)
 
+        self.analyze_all_btn2 = QPushButton('Analyze All 2')
+        self.analyze_all_btn2.clicked.connect(lambda: self.analyze_all2(True))
+        self.analyze_all_btn2.setEnabled(False)
+
         # Add checkbox for showing bounding boxes
         self.show_boxes_checkbox = QCheckBox("Show Bounding Boxes")
         self.show_boxes_checkbox.setChecked(True)
@@ -676,6 +681,7 @@ class PDFViewer(QMainWindow):
         top_btn_layout.addLayout(page_layout)
         top_btn_layout.addWidget(self.analyze_btn)
         top_btn_layout.addWidget(self.analyze_all_btn)
+        top_btn_layout.addWidget(self.analyze_all_btn2)
         top_btn_layout.addWidget(self.show_boxes_checkbox)
         top_btn_layout.addWidget(self.text_scale_label)
         top_btn_layout.addWidget(self.text_scale_spin)
@@ -1496,8 +1502,10 @@ class PDFViewer(QMainWindow):
             logger.info(f"Processing translation for page {page_num}")
             logger.info(f"Translated text: {translated_text}")
             
+            logger.info(f"translation done 1")
             # Create cache key using string format
             cache_key = f"{page_num}_{language_name}"
+            logger.info(f"translation done 2")
             
             # Get the original page structure
             logger.debug(f"Document data: {self.document_data}")
@@ -1506,12 +1514,14 @@ class PDFViewer(QMainWindow):
             logger.debug(f"Page number type: {type(page_num)}")
             #if isinstance(page_num, int):
             #    page_num = str(page_num)
+            logger.info(f"translation done 3")
 
             original_structure = self.document_data['page_structures'].get(str(page_num))
             if not original_structure or 'structure' not in original_structure:
                 logger.error(f"No valid structure found for page {page_num}")
                 return
-                
+
+            logger.info(f"translation done 4")
             # Create translation object with timestamp
             translation = {
                 "timestamp": datetime.datetime.now().isoformat(),
@@ -1519,12 +1529,12 @@ class PDFViewer(QMainWindow):
                     "elements": []
                 }
             }
-            
+            logger.info(f"translation done 5")
             # Process the translated text based on the original structure
             original_elements = original_structure['structure']['elements']
             translated_lines = translated_text.split('\n\n')
             current_line = 0
-
+            logger.info(f"translation done 6")
             # iterate original elements and translated line together
             for element, translated_line in zip(original_elements, translated_lines):
                 # [paragraph]\ntext 
@@ -1534,6 +1544,7 @@ class PDFViewer(QMainWindow):
                 #separate line by \n and remove only the first line
                 # get first line and check if it is [paragraph]
                 first_line = translated_line.split('\n')[0].strip().lower()
+                logger.info(f"First line: {first_line}, paragraph name: {paragraph_name}")
                 if first_line == paragraph_name:
                     text = '\n'.join(translated_line.split('\n')[1:])
                 else:
@@ -1613,6 +1624,132 @@ class PDFViewer(QMainWindow):
                                   "The API key doesn't appear to be valid. It should start with 'sk-'.")
         
         return False
+
+    def analyze_all2(self, force_new_analysis=True):
+        """Analyze all pages using Docker-hosted service"""
+        try:
+            logger.info("Analyzing all pages using Docker service")
+            QApplication.setOverrideCursor(QCursor(Qt.WaitCursor))
+            
+            if not hasattr(self, 'current_file') or not self.current_file:
+                logger.warning("No PDF file loaded")
+                QMessageBox.warning(self, "Error", "Please open a PDF file first.")
+                return
+            
+            # Docker service endpoint
+            url = 'http://localhost:5060'
+            
+            try:
+                # Open the PDF file in binary mode
+                with open(self.current_file, 'rb') as pdf_file:
+                    # Prepare the file for upload
+                    files = {
+                        'file': (os.path.basename(self.current_file), pdf_file, 'application/pdf')
+                    }
+                    
+                    # Show status message
+                    self.status_label.showMessage("Analyzing document structure...", 0)
+                    QApplication.processEvents()
+                    
+                    # Make the POST request to the Docker service
+                    response = requests.post(url, files=files)
+                    
+                    # Check if request was successful
+                    if response.status_code == 200:
+                        # Parse the JSON response
+                        results = response.json()
+                        
+                        if not isinstance(results, list):
+                            raise ValueError("Expected JSON array response")
+                        
+                        # Group results by page number
+                        page_elements = {}
+                        for element in results:
+                            page_num = str(element['page_number'] - 1)  # Convert to 0-based index
+                            if page_num not in page_elements:
+                                page_elements[page_num] = []
+                            
+                            # Convert the element to our structure format
+                            structured_element = {
+                                'category': element['type'].lower(),
+                                'content': {
+                                    'text': element['text'],
+                                    'html': element['text']  # Add html field with same text content
+                                },
+                                'coordinates': [
+                                    {'x': element['left'] / element['page_width'], 
+                                     'y': element['top'] / element['page_height']},
+                                    {'x': (element['left'] + element['width']) / element['page_width'],
+                                     'y': element['top'] / element['page_height']},
+                                    {'x': (element['left'] + element['width']) / element['page_width'],
+                                     'y': (element['top'] + element['height']) / element['page_height']},
+                                    {'x': element['left'] / element['page_width'],
+                                     'y': (element['top'] + element['height']) / element['page_height']}
+                                ],
+                                'relative_size': {
+                                    'width_mm': element['width'] * 0.352778,  # Convert to mm (approximate)
+                                    'height_mm': element['height'] * 0.352778,
+                                    'point_size': element['height'] * 0.75  # Approximate point size from height
+                                },
+                                'attributes': {
+                                    'page_width': element['page_width'],
+                                    'page_height': element['page_height']
+                                },
+                                'id': len(page_elements[page_num])
+                            }
+                            page_elements[page_num].append(structured_element)
+                        
+                        # Store the analysis results in our format
+                        for page_num, elements in page_elements.items():
+                            self.document_data['page_structures'][page_num] = {
+                                'timestamp': datetime.datetime.now().isoformat(),
+                                'structure': {
+                                    'elements': elements,
+                                    'metadata': {
+                                        'page_number': int(page_num),
+                                        'page_width': elements[0]['attributes']['page_width'],
+                                        'page_height': elements[0]['attributes']['page_height']
+                                    }
+                                }
+                            }
+                            # Update progress bar for analyzed pages
+                            self.translation_progress.mark_page_structure(int(page_num))
+                        
+                        # Update the display
+                        self.update_page_display()
+                        self.translation_progress.update()
+                        
+                        # Auto-save session after analysis
+                        self.save_session()
+                        
+                        # Show completion message
+                        analyzed_pages = len(page_elements)
+                        self.status_label.showMessage(
+                            f"Document analysis completed - {analyzed_pages} pages analyzed", 
+                            3000
+                        )
+                        logger.info(f"Document analysis completed successfully - {analyzed_pages} pages analyzed")
+                        
+                    else:
+                        error_msg = f"Service returned status code: {response.status_code}"
+                        logger.error(error_msg)
+                        QMessageBox.warning(self, "Analysis Error", 
+                                         f"Failed to analyze document: {error_msg}")
+                        
+            except requests.exceptions.ConnectionError:
+                error_msg = "Could not connect to the analysis service. Please ensure the Docker service is running on port 5060."
+                logger.error(error_msg)
+                QMessageBox.warning(self, "Connection Error", error_msg)
+            except Exception as e:
+                error_msg = f"Error during document analysis: {str(e)}"
+                logger.error(error_msg)
+                logger.error("Full error details:", exc_info=True)
+                QMessageBox.warning(self, "Analysis Error", error_msg)
+                
+        finally:
+            # Restore cursor
+            QApplication.restoreOverrideCursor()
+            self.ensure_normal_cursor()
     
     def analyze_all(self, force_new_analysis=True):
         """Analyze all pages using Upstage API"""
@@ -1958,7 +2095,7 @@ class PDFViewer(QMainWindow):
                 category = element.get('category', 'unknown')
                 content = element.get('content', {})
                 html = content.get('html', '')
-                if html:
+                if html is not None:
                     # Remove HTML tags and convert to plain text
                     text = re.sub(r'<[^>]+>', '', html).strip()
                     #if text.strip():  # Only add if there's actual text
@@ -3215,6 +3352,7 @@ class PDFViewer(QMainWindow):
             self.translate_btn.setEnabled(True)
             self.analyze_btn.setEnabled(True)
             self.analyze_all_btn.setEnabled(True)
+            self.analyze_all_btn2.setEnabled(True)
             self.translate_all_btn.setEnabled(True)  # Enable the Translate All button
             self.export_btn.setEnabled(True)  # Enable the Export button
             self.save_session_btn.setEnabled(True)  # Enable the Save Session button
@@ -3728,7 +3866,8 @@ class TranslatedPageDisplayWidget(QWidget):
                     scaled_y1 = offset_y + (y1 * scale)
                     
                     # Get original point size and calculate scaled size
-                    point_size = orig_elem.get('relative_size', {}).get('point_size', 12)
+                    #point_size = orig_elem.get('relative_size', {}).get('point_size', 12)
+                    point_size = 12
                     scaled_font_size = point_size * scale * text_scale
                     
                     # Create font with scaled size
