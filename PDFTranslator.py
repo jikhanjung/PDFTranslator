@@ -2979,20 +2979,67 @@ class PDFViewer(QMainWindow):
                         
                         try:
                             if has_korean_font:
-                                page.insert_textbox(
+                                text_inserted = page.insert_textbox(
                                     text_rect,
                                     translated_text,
                                     fontname="MalgunGothic",
                                     fontsize=scaled_font_size,
                                     align=0
-                                )
+                                )[0]
+                                
+                                attempts = 0
+                                max_attempts = 5  # Increased max attempts since we're using smaller increments
+                                rect_expansion = 1.0
+                                
+                                while text_inserted < 0 and attempts < max_attempts:
+                                    attempts += 1
+                                    if attempts % 2 == 1:
+                                        # On odd attempts, expand rectangle by 10%
+                                        rect_expansion += 0.1
+                                        expanded_rect = fitz.Rect(
+                                            text_rect.x0,
+                                            text_rect.y0,
+                                            text_rect.x0 + (text_rect.width * rect_expansion),
+                                            text_rect.y0 + (text_rect.height * rect_expansion)
+                                        )
+                                        text_inserted = page.insert_textbox(
+                                            expanded_rect,
+                                            translated_text,
+                                            fontname="MalgunGothic",
+                                            fontsize=scaled_font_size,
+                                            align=0
+                                        )[0]
+                                        logger.debug(f"Expanded rect by {(rect_expansion-1.0)*100}%, result: {text_inserted}")
+                                    else:
+                                        # On even attempts, reduce font size
+                                        scaled_font_size *= 0.9
+                                        text_inserted = page.insert_textbox(
+                                            expanded_rect if attempts > 1 else text_rect,
+                                            translated_text,
+                                            fontname="MalgunGothic",
+                                            fontsize=scaled_font_size,
+                                            align=0
+                                        )[0]
+                                        logger.debug(f"Reduced font to {scaled_font_size}, result: {text_inserted}")
                             else:
-                                page.insert_textbox(
+                                text_inserted = page.insert_textbox(
                                     text_rect,
                                     translated_text,
                                     fontsize=scaled_font_size,
                                     align=0
-                                )
+                                )[0]
+                                
+                                if text_inserted < 0:
+                                    scaled_font_size *= 0.9
+                                    text_inserted = page.insert_textbox(
+                                        text_rect,
+                                        translated_text,
+                                        fontsize=scaled_font_size,
+                                        align=0
+                                    )[0]
+                                    
+                                if text_inserted < 0:
+                                    logger.warning(f"Text still clipped after size reduction: {translated_text[:30]}...")
                         except Exception as e:
                             logger.error(f"Error inserting text: {str(e)}")
             
