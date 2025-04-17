@@ -36,7 +36,7 @@ load_dotenv()
 
 COMPANY_NAME = "PALEOBYTES"
 PROGRAM_NAME = "PDFTranslator"
-PROGRAM_VERSION = "0.0.3"
+PROGRAM_VERSION = "0.0.4"
 
 # Set OpenAI API key the old way
 openai.api_key = os.getenv('OPENAI_API_KEY')
@@ -1494,6 +1494,7 @@ class PDFViewer(QMainWindow):
         """Handle completed translation and store in structured format"""
         try:
             logger.info(f"Processing translation for page {page_num}")
+            logger.info(f"Translated text: {translated_text}")
             
             # Create cache key using string format
             cache_key = f"{page_num}_{language_name}"
@@ -1956,9 +1957,9 @@ class PDFViewer(QMainWindow):
                 html = content.get('html', '')
                 if html:
                     # Remove HTML tags and convert to plain text
-                    text = re.sub(r'<[^>]+>', '', html)
-                    if text.strip():  # Only add if there's actual text
-                        structured_text.append(f"[{category}]\n{text}")
+                    text = re.sub(r'<[^>]+>', '', html).strip()
+                    #if text.strip():  # Only add if there's actual text
+                    structured_text.append(f"[{category}]\n{text}")
                     
             if not structured_text:
                 logger.warning("No text found in structure elements")
@@ -3945,5 +3946,5 @@ Requirements:
 - keyring
 
 Build command:
-pyinstaller --name "PDFTranslator_v0.0.3_20250416.exe" --onefile --noconsole PDFTranslator.py
+pyinstaller --name "PDFTranslator_v0.0.4.exe" --onefile --noconsole PDFTranslator.py
 '''
