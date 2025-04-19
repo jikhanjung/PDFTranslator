@@ -552,12 +552,16 @@ class PDFViewer(QMainWindow):
         }
         self.active_workers = []
         self.detected_language = None
+        self.recent_files = []
         
         # Initialize UI
         self.init_ui()
         
         # Apply settings
         self.apply_settings()
+        
+        # Add recent files list
+        self.load_recent_files()
         
     def init_ui(self):
         #self.setWindowTitle('PDF Translator')
@@ -744,11 +748,23 @@ class PDFViewer(QMainWindow):
         menubar = self.menuBar()
         
         # File menu
-        file_menu = menubar.addMenu('File')
+        file_menu = menubar.addMenu('&File')
         
-        open_action = QAction('Open PDF', self)
+        # Open action
+        open_action = QAction('&Open...', self)
+        open_action.setShortcut('Ctrl+O')
+        open_action.setStatusTip('Open PDF file')
         open_action.triggered.connect(self.open_pdf)
         file_menu.addAction(open_action)
+        
+        # Add Recent Files submenu
+        self.recent_files_menu = file_menu.addMenu("Recent Files")
+        
+        # Add separator
+        file_menu.addSeparator()
+        
+        # Update the recent files menu after creating it
+        self.update_recent_files_menu()
         
         save_session_action = QAction('Save Session', self)
         save_session_action.triggered.connect(self.save_session)
@@ -1645,8 +1661,7 @@ class PDFViewer(QMainWindow):
                 return
             
             # Get service URL from settings
-            settings = QSettings()
-            base_url = settings.value('service/url', 'http://192.168.55.253:8501').rstrip('/')
+            base_url = self.settings.value('service/url', 'http://192.168.55.253:8501').rstrip('/')
             logger.info(f"Using analysis service at: {base_url}")
             
             # First try PyMuPDF text extraction
@@ -3177,8 +3192,7 @@ class PDFViewer(QMainWindow):
                 y_offset = margin + (available_height - scaled_height) / 2
                 
                 # Get text scale settings
-                settings = QSettings("PDFTranslator", "Settings")
-                text_scale = settings.value("text_scale", 0.8, type=float)
+                text_scale = self.settings.value("text_scale", 0.8, type=float)
                 pdf_scale_factor = 1.5
                 
                 # Try to use Korean font if available
@@ -3366,121 +3380,146 @@ class PDFViewer(QMainWindow):
         logger.info(f"Logging level changed to: {level_name}")
 
     def open_pdf(self):
-        file_path, _ = QFileDialog.getOpenFileName(self, "Open PDF", "", "PDF Files (*.pdf)")
+        """Open PDF file dialog"""
+        file_name, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open PDF file",
+            "",
+            "PDF files (*.pdf)"
+        )
         
-        if file_path:
-            # Store the current PDF path
-            self.current_pdf_path = file_path
-            self.current_file = os.path.abspath(file_path)
-            self.document_data = {}
+        if file_name:
+            self.load_pdf(file_name)
 
-            
-            # Log the file opening
-            logger.info(f"Opening PDF: {os.path.basename(file_path)}")
-            
-            # Clean up any running threads before opening new document
-            self.cleanup_threads()
-            
-            # Ensure normal cursor at the start
-            self.ensure_normal_cursor()
-            
-            # Close previous document if one is open
-            if self.doc:
-                self.doc.close()
+    #def open_pdf(self):
+    def load_pdf(self, file_path):
+        #file_path, _ = QFileDialog.getOpenFileName(self, "Open PDF", "", "PDF Files (*.pdf)")
+
+        """Load a PDF file"""
+        try:
+            # Add to recent files before attempting to load
+            # (only if it's a valid PDF)
+            if os.path.exists(file_path) and file_path.lower().endswith('.pdf'):
+                self.add_to_recent_files(file_path)
+
+            if file_path:
+                # Store the current PDF path
+                self.current_pdf_path = file_path
+                self.current_file = os.path.abspath(file_path)
+                self.document_data = {}
+
                 
-            # Reset the progress bar immediately
-            self.translation_progress.clear()
+                # Log the file opening
+                logger.info(f"Opening PDF: {os.path.basename(file_path)}")
                 
-            # Open new document
-            self.doc = fitz.open(file_path)
-            self.current_page = 0
-            
-            # Store page dimensions in document data
-            self.document_data['page_dimensions'] = {}
-            for i in range(len(self.doc)):
-                page = self.doc[i]
-                rect = page.rect
+                # Clean up any running threads before opening new document
+                self.cleanup_threads()
                 
-                # Convert points to millimeters (1 point = 0.352778 mm)
-                points_to_mm = 0.352778
+                # Ensure normal cursor at the start
+                self.ensure_normal_cursor()
                 
-                self.document_data['page_dimensions'][str(i)] = {
-                    # Points (original PDF units)
-                    'points': {
-                        'width': rect.width,
-                        'height': rect.height,
-                        'x0': rect.x0,
-                        'y0': rect.y0,
-                        'x1': rect.x1,
-                        'y1': rect.y1
-                    },
-                    # Millimeters (physical units)
-                    'mm': {
-                        'width': rect.width * points_to_mm,
-                        'height': rect.height * points_to_mm,
-                        'x0': rect.x0 * points_to_mm,
-                        'y0': rect.y0 * points_to_mm,
-                        'x1': rect.x1 * points_to_mm,
-                        'y1': rect.y1 * points_to_mm
+                # Close previous document if one is open
+                if self.doc:
+                    self.doc.close()
+                    
+                # Reset the progress bar immediately
+                self.translation_progress.clear()
+                    
+                # Open new document
+                self.doc = fitz.open(file_path)
+                self.current_page = 0
+                
+                # Store page dimensions in document data
+                self.document_data['page_dimensions'] = {}
+                for i in range(len(self.doc)):
+                    page = self.doc[i]
+                    rect = page.rect
+                    
+                    # Convert points to millimeters (1 point = 0.352778 mm)
+                    points_to_mm = 0.352778
+                    
+                    self.document_data['page_dimensions'][str(i)] = {
+                        # Points (original PDF units)
+                        'points': {
+                            'width': rect.width,
+                            'height': rect.height,
+                            'x0': rect.x0,
+                            'y0': rect.y0,
+                            'x1': rect.x1,
+                            'y1': rect.y1
+                        },
+                        # Millimeters (physical units)
+                        'mm': {
+                            'width': rect.width * points_to_mm,
+                            'height': rect.height * points_to_mm,
+                            'x0': rect.x0 * points_to_mm,
+                            'y0': rect.y0 * points_to_mm,
+                            'x1': rect.x1 * points_to_mm,
+                            'y1': rect.y1 * points_to_mm
+                        }
                     }
-                }
-            
-            # Update page total label
-            self.page_total.setText(f"/ {len(self.doc)}")
-            self.translation_progress.set_total_pages(len(self.doc))
-            self.translation_progress.set_current_page(self.current_page)
-            self.translation_progress.update()
-
-            
-            # Clear translation cache when opening a new document
-            self.document_data['translations'] = {}
-            self.document_data['page_structures'] = {}
-            self.document_data['metadata'] = {}
-            
-            # Reset detected language when opening a new PDF
-            self.detected_language = None
-            
-            # Update UI
-            self.update_page_display()  # This will update the PDF display and text areas
-            self.update_buttons()  # This will properly set the previous button state
-            
-            # Enable buttons
-            self.translate_btn.setEnabled(True)
-            self.analyze_btn.setEnabled(True)
-            self.analyze_all_btn.setEnabled(True)
-            self.analyze_all_btn2.setEnabled(True)
-            self.translate_all_btn.setEnabled(True)  # Enable the Translate All button
-            self.export_btn.setEnabled(True)  # Enable the Export button
-            self.save_session_btn.setEnabled(True)  # Enable the Save Session button
-            
-            # Check for existing session and ask if user wants to load it
-            pdf_filename = os.path.basename(file_path)
-            # get directory of file
-            self.pdf_directory = os.path.dirname(file_path)
-
-            session_file = os.path.join(self.pdf_directory, f'{os.path.splitext(pdf_filename)[0]}.json')
-            
-            if os.path.exists(session_file):
-                reply = QMessageBox.Yes
-                #reply = QMessageBox.question(self, 'Load Session', 
-                #    f'Found existing session for {pdf_filename}. Do you want to load it?',
-                #    QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
                 
-                if reply == QMessageBox.Yes:
-                    self.load_session(session_file)
+                # Update page total label
+                self.page_total.setText(f"/ {len(self.doc)}")
+                self.translation_progress.set_total_pages(len(self.doc))
+                self.translation_progress.set_current_page(self.current_page)
+                self.translation_progress.update()
+
+                
+                # Clear translation cache when opening a new document
+                self.document_data['translations'] = {}
+                self.document_data['page_structures'] = {}
+                self.document_data['metadata'] = {}
+                
+                # Reset detected language when opening a new PDF
+                self.detected_language = None
+                
+                # Update UI
+                self.update_page_display()  # This will update the PDF display and text areas
+                self.update_buttons()  # This will properly set the previous button state
+                
+                # Enable buttons
+                self.translate_btn.setEnabled(True)
+                self.analyze_btn.setEnabled(True)
+                self.analyze_all_btn.setEnabled(True)
+                self.analyze_all_btn2.setEnabled(True)
+                self.translate_all_btn.setEnabled(True)  # Enable the Translate All button
+                self.export_btn.setEnabled(True)  # Enable the Export button
+                self.save_session_btn.setEnabled(True)  # Enable the Save Session button
+                
+                # Check for existing session and ask if user wants to load it
+                pdf_filename = os.path.basename(file_path)
+                # get directory of file
+                self.pdf_directory = os.path.dirname(file_path)
+
+                session_file = os.path.join(self.pdf_directory, f'{os.path.splitext(pdf_filename)[0]}.json')
+                
+                if os.path.exists(session_file):
+                    reply = QMessageBox.Yes
+                    #reply = QMessageBox.question(self, 'Load Session', 
+                    #    f'Found existing session for {pdf_filename}. Do you want to load it?',
+                    #    QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+                    
+                    if reply == QMessageBox.Yes:
+                        self.load_session(session_file)
+                    else:
+                        # Initialize text areas with current page content
+                        self.extract_text()  # This will update the original text area
+                        current_language = self.get_output_language_name()
+                        self.translated_text.setText("Click 'Translate' button to translate to " + current_language)
+                        self.structure_text.setText("Click 'Analyze' button to analyze page structure")
                 else:
                     # Initialize text areas with current page content
+                    self.save_session()
                     self.extract_text()  # This will update the original text area
                     current_language = self.get_output_language_name()
                     self.translated_text.setText("Click 'Translate' button to translate to " + current_language)
                     self.structure_text.setText("Click 'Analyze' button to analyze page structure")
-            else:
-                # Initialize text areas with current page content
-                self.save_session()
-                self.extract_text()  # This will update the original text area
-                current_language = self.get_output_language_name()
-                self.translated_text.setText("Click 'Translate' button to translate to " + current_language)
-                self.structure_text.setText("Click 'Analyze' button to analyze page structure")
+
+        except Exception as e:
+            logger.error(f"Error loading PDF: {str(e)}", exc_info=True)
+            QMessageBox.critical(self, "Error", f"Could not load PDF file: {str(e)}")
+            return False
 
     def on_view_tab_changed(self, index):
         """Handle tab change between PDF view and translated view"""
@@ -3532,6 +3571,76 @@ class PDFViewer(QMainWindow):
         self.translated_display.pan_offset = pan_offset
         self.pdf_display.update()
         self.translated_display.update()
+
+    def load_recent_files(self):
+        """Load recent files from settings"""
+        #settings = QSettings()
+        files = self.settings.value('recent_files', [])
+        # Convert to list if it's a string (can happen with QSettings)
+        if isinstance(files, str):
+            files = [files]
+        elif not isinstance(files, list):
+            files = []
+        
+        # Filter out non-existent files
+        self.recent_files = [f for f in files if os.path.exists(f)]
+        # Keep only last 5 files
+        self.recent_files = self.recent_files[:5]
+        logger.debug(f"Loaded recent files: {self.recent_files}")
+        
+        if hasattr(self, 'recent_files_menu'):
+            self.update_recent_files_menu()
+
+    def save_recent_files(self):
+        """Save recent files to settings"""
+        #settings = QSettings()
+        files_to_save = [f for f in self.recent_files if os.path.exists(f)]
+        self.settings.setValue('recent_files', files_to_save)
+        self.settings.sync()  # Ensure settings are written to disk
+        logger.debug(f"Saved recent files: {files_to_save}")
+
+    def add_to_recent_files(self, file_path):
+        """Add a file to recent files list"""
+        if file_path in self.recent_files:
+            logger.debug(f"Removing {file_path} from recent files")
+            self.recent_files.remove(file_path)
+        logger.debug(f"Adding {file_path} to recent files")
+        self.recent_files.insert(0, file_path)
+        # Keep only last 5 files
+        self.recent_files = self.recent_files[:5]
+        self.save_recent_files()
+        self.update_recent_files_menu()
+        
+    def update_recent_files_menu(self):
+        """Update the recent files menu"""
+        self.recent_files_menu.clear()
+        
+        if not self.recent_files:
+            no_recent = self.recent_files_menu.addAction("No recent files")
+            no_recent.setEnabled(False)
+            return
+            
+        for file_path in self.recent_files:
+            action = self.recent_files_menu.addAction(os.path.basename(file_path))
+            action.setData(file_path)
+            action.setStatusTip(file_path)
+            action.triggered.connect(self.open_recent_file)  # Connect the triggered signal
+        
+    def open_recent_file(self):
+        """Handle opening a recent file"""
+        logger.info("Opening recent file")
+        action = self.sender()
+        if action:
+            file_path = action.data()
+            logger.info(f"Opening recent file: {file_path}")
+            if os.path.exists(file_path):
+                self.load_pdf(file_path)
+            else:
+                QMessageBox.warning(self, "File Not Found", 
+                                  f"The file {file_path} no longer exists.")
+                self.recent_files.remove(file_path)
+                self.save_recent_files()
+                self.update_recent_files_menu()
 
 class PDFDisplayWidget(QWidget):
     # Add signals for zoom and pan synchronization
@@ -3937,8 +4046,6 @@ class TranslatedPageDisplayWidget(QWidget):
                     rect = QRectF(x0, y0, x1 - x0, y1 - y0)
                     painter.drawRect(rect)
 
-            # Continue with existing text drawing code...
-
             # Get text scale factor and line spacing from settings
             settings = QSettings("PDFTranslator", "Settings")
             text_scale = settings.value("text_scale", 0.8, type=float)
@@ -3946,7 +4053,7 @@ class TranslatedPageDisplayWidget(QWidget):
             
             # Draw each element with proper scaling
             for orig_elem, trans_elem in zip(elements, translation):
-                logger.debug(f"Drawing element: {orig_elem} {trans_elem}")
+                #logger.debug(f"Drawing element: {orig_elem} {trans_elem}")
                 if 'coordinates' in orig_elem and 'content' in trans_elem:
                     # Get original bounding box coordinates
                     coords = orig_elem['coordinates']
