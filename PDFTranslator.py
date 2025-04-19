@@ -16,12 +16,13 @@ from PyQt5.QtWidgets import (
     QLabel, QTextEdit, QFileDialog, QComboBox, QCheckBox, QStatusBar, 
     QSplitter, QScrollArea, QLineEdit, QMessageBox, QDialog, QDialogButtonBox,
     QFormLayout, QTabWidget, QRadioButton, QButtonGroup, QSpinBox, QGroupBox,
-    QProgressBar, QSizePolicy, QMenu, QAction, QDoubleSpinBox, QInputDialog
+    QProgressBar, QSizePolicy, QMenu, QAction, QDoubleSpinBox, QInputDialog,
+    QShortcut
 )
 from PyQt5.QtGui import (
     QPixmap, QPainter, QColor, QTextCursor, QPen, QBrush, QImage, QFont, 
     QFontMetrics, QCursor, QTextFormat, QTextCharFormat, QPalette, QPolygonF,
-    QTextBlockFormat, QTextDocument
+    QTextBlockFormat, QTextDocument, QKeySequence
 )
 from PyQt5.QtCore import (
     Qt, QThread, pyqtSignal, QRectF, QSize, QTimer, QRect, QPoint, QSettings, QPointF
@@ -812,6 +813,13 @@ class PDFViewer(QMainWindow):
         self.translated_display.zoomChanged.connect(self.set_zoom)
         self.translated_display.panChanged.connect(self.set_pan)
         
+        # Add keyboard shortcuts for page navigation
+        prev_page_shortcut = QShortcut(QKeySequence(Qt.Key_PageUp), self)
+        prev_page_shortcut.activated.connect(self.prev_page)
+        
+        next_page_shortcut = QShortcut(QKeySequence(Qt.Key_PageDown), self)
+        next_page_shortcut.activated.connect(self.next_page)
+        
     def show_preferences(self):
         """Show the preferences dialog"""
         dialog = PreferencesDialog(self)
@@ -1508,8 +1516,8 @@ class PDFViewer(QMainWindow):
             logger.info(f"translation done 2")
             
             # Get the original page structure
-            logger.debug(f"Document data: {self.document_data}")
-            logger.debug(f"Page structures: {self.document_data['page_structures']}")
+            #logger.debug(f"Document data: {self.document_data}")
+            #logger.debug(f"Page structures: {self.document_data['page_structures']}")
             # check if page number is integer or string and debugprint it
             logger.debug(f"Page number type: {type(page_num)}")
             #if isinstance(page_num, int):
@@ -1626,7 +1634,7 @@ class PDFViewer(QMainWindow):
         return False
 
     def analyze_all2(self, force_new_analysis=True):
-        """Analyze all pages using Docker-hosted service"""
+        """Analyze all pages using Docker-hosted service with smart OCR decision"""
         try:
             logger.info("Analyzing all pages using Docker service")
             QApplication.setOverrideCursor(QCursor(Qt.WaitCursor))
@@ -1636,33 +1644,109 @@ class PDFViewer(QMainWindow):
                 QMessageBox.warning(self, "Error", "Please open a PDF file first.")
                 return
             
-            # Docker service endpoint
-            url = 'http://localhost:5060'
+            # Get service URL from settings
+            settings = QSettings()
+            base_url = settings.value('service/url', 'http://192.168.55.253:8501').rstrip('/')
+            logger.info(f"Using analysis service at: {base_url}")
             
-            try:
-                # Open the PDF file in binary mode
+            # First try PyMuPDF text extraction
+            sample_size = max(1, len(self.doc) // 10)  # 10% of pages or at least 1 page
+            logger.info(f"Checking first {sample_size} pages for text content using PyMuPDF")
+            
+            # Check text content in sample pages using PyMuPDF
+            page_char_counts = {}
+            for page_num in range(sample_size):
+                try:
+                    page = self.doc[page_num]
+                    text = page.get_text()
+                    char_count = len(text.strip())
+                    page_char_counts[page_num] = char_count
+                    logger.debug(f"Page {page_num + 1}: {char_count} characters")
+                except Exception as e:
+                    logger.error(f"Error extracting text from page {page_num + 1}: {str(e)}")
+                    page_char_counts[page_num] = 0
+            
+            # Calculate average characters per page
+            total_chars = sum(page_char_counts.values())
+            avg_chars_per_page = total_chars / len(page_char_counts) if page_char_counts else 0
+            
+            logger.info(f"PyMuPDF found average of {avg_chars_per_page:.1f} characters per page in sample")
+            logger.info(f"Character counts by page: {page_char_counts}")
+            
+            # Decide if OCR is needed:
+            # - If average characters per page is less than 100
+            # - Or if more than half of sample pages have less than 50 characters
+            low_text_pages = sum(1 for count in page_char_counts.values() if count < 50)
+            need_ocr = (avg_chars_per_page < 100 or 
+                       (low_text_pages / len(page_char_counts) > 0.5))
+            
+            if need_ocr:
+                logger.info(f"Low text content detected in PyMuPDF extraction (avg {avg_chars_per_page:.1f} chars/page), proceeding with OCR")
+                # Get current input language
+                input_lang = self.get_input_language()
+                
+                # Perform OCR
+                url_ocr = f"{base_url}/ocr"
                 with open(self.current_file, 'rb') as pdf_file:
-                    # Prepare the file for upload
                     files = {
                         'file': (os.path.basename(self.current_file), pdf_file, 'application/pdf')
                     }
+                    data = {
+                        'language': input_lang
+                    }
                     
-                    # Show status message
-                    self.status_label.showMessage("Analyzing document structure...", 0)
+                    self.status_label.showMessage("Performing OCR on document...", 0)
                     QApplication.processEvents()
                     
-                    # Make the POST request to the Docker service
-                    response = requests.post(url, files=files)
+                    try:
+                        response = requests.post(url_ocr, files=files, data=data)
+                        
+                        if response.status_code == 200:
+                            ocr_pdf_path = os.path.join(os.path.dirname(self.current_file), 
+                                                      'ocr_' + os.path.basename(self.current_file))
+                            
+                            with open(ocr_pdf_path, 'wb') as f:
+                                f.write(response.content)
+                            
+                            logger.info(f"OCR PDF saved to: {ocr_pdf_path}")
+                            
+                            # Use the OCR'd PDF for layout analysis
+                            analysis_file = ocr_pdf_path
+                        else:
+                            raise ValueError(f"OCR service returned status code: {response.status_code}")
+                    except requests.exceptions.ConnectionError:
+                        error_msg = f"Could not connect to the OCR service at {url_ocr}. Please check the service URL in preferences."
+                        logger.error(error_msg)
+                        QMessageBox.warning(self, "Connection Error", error_msg)
+                        return
+                    except Exception as e:
+                        error_msg = f"Error during OCR: {str(e)}"
+                        logger.error(error_msg)
+                        QMessageBox.warning(self, "OCR Error", error_msg)
+                        return
+            else:
+                logger.info("Sufficient text content found in PDF, proceeding with layout analysis")
+                analysis_file = self.current_file
+            
+            # Perform layout analysis
+            with open(analysis_file, 'rb') as pdf_file:
+                files = {
+                    'file': (os.path.basename(analysis_file), pdf_file, 'application/pdf')
+                }
+                
+                self.status_label.showMessage("Analyzing document structure...", 0)
+                QApplication.processEvents()
+                
+                try:
+                    response = requests.post(base_url, files=files)
                     
-                    # Check if request was successful
                     if response.status_code == 200:
-                        # Parse the JSON response
                         results = response.json()
                         
                         if not isinstance(results, list):
                             raise ValueError("Expected JSON array response")
                         
-                        # Group results by page number
+                        # Process analysis results
                         page_elements = {}
                         for element in results:
                             page_num = str(element['page_number'] - 1)  # Convert to 0-based index
@@ -1674,7 +1758,7 @@ class PDFViewer(QMainWindow):
                                 'category': element['type'].lower(),
                                 'content': {
                                     'text': element['text'],
-                                    'html': element['text']  # Add html field with same text content
+                                    'html': element['text']
                                 },
                                 'coordinates': [
                                     {'x': element['left'] / element['page_width'], 
@@ -1687,19 +1771,19 @@ class PDFViewer(QMainWindow):
                                      'y': (element['top'] + element['height']) / element['page_height']}
                                 ],
                                 'relative_size': {
-                                    'width_mm': element['width'] * 0.352778,  # Convert to mm (approximate)
+                                    'width_mm': element['width'] * 0.352778,
                                     'height_mm': element['height'] * 0.352778,
-                                    'point_size': element['height'] * 0.75  # Approximate point size from height
+                                    'point_size': element['height'] * 0.75
                                 },
                                 'attributes': {
                                     'page_width': element['page_width'],
                                     'page_height': element['page_height']
                                 },
-                                'id': len(page_elements[page_num])
+                                'id': len(page_elements[page_num])  # ID starts from 0 for each page
                             }
                             page_elements[page_num].append(structured_element)
                         
-                        # Store the analysis results in our format
+                        # Store the analysis results
                         for page_num, elements in page_elements.items():
                             self.document_data['page_structures'][page_num] = {
                                 'timestamp': datetime.datetime.now().isoformat(),
@@ -1724,28 +1808,38 @@ class PDFViewer(QMainWindow):
                         
                         # Show completion message
                         analyzed_pages = len(page_elements)
-                        self.status_label.showMessage(
-                            f"Document analysis completed - {analyzed_pages} pages analyzed", 
-                            3000
-                        )
-                        logger.info(f"Document analysis completed successfully - {analyzed_pages} pages analyzed")
+                        msg = f"Document analysis completed - {analyzed_pages} pages analyzed"
+                        if need_ocr:
+                            msg += " (with OCR)"
+                            # Ask if user wants to open the OCR'd PDF
+                            reply = QMessageBox.question(
+                                self,
+                                "OCR Complete",
+                                f"OCR processing completed. The OCR'd PDF has been saved as:\n{ocr_pdf_path}\n\nWould you like to open it?",
+                                QMessageBox.Yes | QMessageBox.No,
+                                QMessageBox.Yes
+                            )
+                            if reply == QMessageBox.Yes:
+                                self.open_exported_file(ocr_pdf_path, True)
+                        
+                        self.status_label.showMessage(msg, 3000)
+                        logger.info(msg)
                         
                     else:
-                        error_msg = f"Service returned status code: {response.status_code}"
+                        error_msg = f"Layout analysis service returned status code: {response.status_code}"
                         logger.error(error_msg)
-                        QMessageBox.warning(self, "Analysis Error", 
-                                         f"Failed to analyze document: {error_msg}")
+                        QMessageBox.warning(self, "Analysis Error", error_msg)
                         
-            except requests.exceptions.ConnectionError:
-                error_msg = "Could not connect to the analysis service. Please ensure the Docker service is running on port 5060."
-                logger.error(error_msg)
-                QMessageBox.warning(self, "Connection Error", error_msg)
-            except Exception as e:
-                error_msg = f"Error during document analysis: {str(e)}"
-                logger.error(error_msg)
-                logger.error("Full error details:", exc_info=True)
-                QMessageBox.warning(self, "Analysis Error", error_msg)
-                
+                except requests.exceptions.ConnectionError:
+                    error_msg = f"Could not connect to the layout analysis service at {base_url}. Please check the service URL in preferences."
+                    logger.error(error_msg)
+                    QMessageBox.warning(self, "Connection Error", error_msg)
+                except Exception as e:
+                    error_msg = f"Error during layout analysis: {str(e)}"
+                    logger.error(error_msg)
+                    logger.error("Full error details:", exc_info=True)
+                    QMessageBox.warning(self, "Analysis Error", error_msg)
+                    
         finally:
             # Restore cursor
             QApplication.restoreOverrideCursor()
@@ -2046,6 +2140,7 @@ class PDFViewer(QMainWindow):
 
     def translate_text(self, force_new_translation=True):
         """Translate the extracted text"""
+        logger.info("Starting translate_text")
         try:
             # Check if we have a document
             if not self.doc:
@@ -3193,17 +3288,18 @@ class PDFViewer(QMainWindow):
             self.status_label.showMessage(f"Export error: {str(e)}", 3000)
             QMessageBox.warning(self, "Export Error", f"Failed to export PDF: {str(e)}")
 
-    def open_exported_file(self, file_path):
+    def open_exported_file(self, file_path, direct_open=False):
         """Open the exported file with the default system application"""
-        reply = QMessageBox.question(
-            self, 
-            "Export Complete", 
-            f"Export completed successfully to:\n{file_path}\n\nWould you like to open this file now?",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.Yes
-        )
+        if not direct_open:
+            reply = QMessageBox.question(
+                self, 
+                "Export Complete", 
+                f"Export completed successfully to:\n{file_path}\n\nWould you like to open this file now?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes
+            )
         
-        if reply == QMessageBox.Yes:
+        if reply == QMessageBox.Yes or direct_open:
             # Open the file with the default system application
             import platform
             
@@ -3555,14 +3651,16 @@ class PDFDisplayWidget(QWidget):
             alpha = 32
             if category == 'header':
                 color = QColor(255, 0, 0, alpha)  # Red
-            elif category == 'heading1':
+            elif category in ['heading1', 'title', 'section header']:
                 color = QColor(0, 255, 0, alpha)  # Green
-            elif category == 'paragraph':
+            elif category in ['paragraph', 'text']:
                 color = QColor(0, 0, 255, alpha)  # Blue
             elif category == 'footnote':
                 color = QColor(255, 255, 0, alpha)  # Yellow
             elif category == 'footer':
                 color = QColor(255, 0, 255, alpha)  # Magenta
+            elif category in ['image', 'table', 'figure']:
+                color = QColor(0, 255, 255, alpha)  # Cyan
             else:
                 color = QColor(128, 128, 128, alpha)  # Gray
 
@@ -4099,6 +4197,17 @@ class PreferencesDialog(QDialog):
         button_layout.addWidget(cancel_button)
         layout.addLayout(button_layout)
         
+        # Add service URL to the existing translation settings
+        service_group = QGroupBox("Analysis Service")
+        service_layout = QFormLayout()
+        
+        self.service_url = QLineEdit()
+        self.service_url.setPlaceholderText("http://192.168.55.253:8501")
+        service_layout.addRow("Service URL:", self.service_url)
+        
+        service_group.setLayout(service_layout)
+        translation_layout.addWidget(service_group)
+        
     def load_settings(self):
         """Load current settings from QSettings"""
         self.input_language_combo.setCurrentText(self.settings.value("input_language_name", "English"))
@@ -4113,6 +4222,11 @@ class PreferencesDialog(QDialog):
             if self.debug_level_combo.itemData(i) == debug_level:
                 self.debug_level_combo.setCurrentIndex(i)
                 break
+        
+        # Load service URL
+        self.service_url.setText(
+            self.settings.value('service/url', 'http://192.168.55.253:8501')
+        )
     
     def save_settings(self):
         """Save settings to QSettings"""
@@ -4132,6 +4246,9 @@ class PreferencesDialog(QDialog):
         
         # Debug level
         self.settings.setValue("debug_level", self.debug_level_combo.currentData())
+        
+        # Save service URL
+        self.settings.setValue('service/url', self.service_url.text() or 'http://192.168.55.253:8501')
         
         # Sync settings to disk
         self.settings.sync()
