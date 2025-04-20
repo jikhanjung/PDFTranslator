@@ -3643,7 +3643,6 @@ class PDFViewer(QMainWindow):
                 self.update_recent_files_menu()
 
 class PDFDisplayWidget(QWidget):
-    # Add signals for zoom and pan synchronization
     zoomChanged = pyqtSignal(float)
     panChanged = pyqtSignal(QPointF)
     
@@ -3653,7 +3652,8 @@ class PDFDisplayWidget(QWidget):
         self.current_page = None
         self.page_structure = None
         self.show_bounding_boxes = True
-
+        self.page_dims = None  # Add this line
+        
         # ---- NEW FIELDS FOR ZOOM AND PAN ----
         self.zoom_factor = 1.0
         self.pan_offset = QPointF(0, 0)
@@ -3661,23 +3661,37 @@ class PDFDisplayWidget(QWidget):
         self.last_mouse_pos = QPointF(0, 0)
         # -------------------------------------
 
+        # Add hover tracking
+        self.hover_element = None
+        self.setMouseTracking(True)
+        
+        # Create context menu
+        self.context_menu = QMenu(self)
+        self.properties_action = self.context_menu.addAction("Properties")
+        self.properties_action.triggered.connect(self.show_element_properties)
+        
+        # Add category submenu
+        self.category_menu = self.context_menu.addMenu("Change category to")
+        self.categories = ["text", "title", "heading", "list", "table", "image", "footer", "header"]
+        for category in self.categories:
+            action = self.category_menu.addAction(category)
+            action.setData(category)
+            action.triggered.connect(self.change_element_category)
+
     def set_page(self, page_num, pixmap):
         """Set the current page to display"""
         self.current_page = page_num
         self.pixmap = pixmap
-
-        # Get the main window instance to access document data
-        main_window = self.window()
-        if hasattr(main_window, 'document_data'):
-            # Get the structure for the new page
-            structure = main_window.document_data['page_structures'].get(page_num)
-            logger.debug(f"Setting page {page_num} structure: {structure}")
-            if structure:
-                self.page_structure = structure
-            else:
-                self.page_structure = None
-                logger.debug(f"No structure found for page {page_num}")
-
+        
+        # Set page dimensions
+        if pixmap:
+            self.page_dims = {
+                'points': {
+                    'width': pixmap.width(),
+                    'height': pixmap.height()
+                }
+            }
+        
         self.update()
 
     def set_page_structure(self, page_num, structure):
@@ -3892,6 +3906,12 @@ class PDFDisplayWidget(QWidget):
             self.is_panning = True
             self.last_mouse_pos = event.pos()  # PyQt6; use event.pos() in PyQt5
             self.setCursor(Qt.ClosedHandCursor)
+        elif event.button() == Qt.RightButton:
+            # Get element under cursor
+            pos = self.widget_to_doc_coords(event.pos())
+            self.hover_element = self.find_element_at_position(pos)
+            if self.hover_element:
+                self.context_menu.popup(event.globalPos())
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
@@ -3908,6 +3928,17 @@ class PDFDisplayWidget(QWidget):
             # Emit signal for synchronization
             self.panChanged.emit(self.pan_offset)
             self.update()
+        else:
+            # Check for elements under cursor
+            pos = self.widget_to_doc_coords(event.pos())
+            old_hover = self.hover_element
+            self.hover_element = self.find_element_at_position(pos)
+            
+            # Update cursor if hover state changed
+            if self.hover_element != old_hover:
+                self.setCursor(Qt.PointingHandCursor if self.hover_element else Qt.ArrowCursor)
+                self.update()  # Repaint to show hover effect
+        
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
@@ -3916,10 +3947,146 @@ class PDFDisplayWidget(QWidget):
         """
         if event.button() == Qt.LeftButton:
             self.is_panning = False
-            self.setCursor(Qt.ArrowCursor)
+            # Reset cursor based on whether we're hovering over an element
+            self.setCursor(Qt.PointingHandCursor if self.hover_element else Qt.ArrowCursor)
+        elif event.button() == Qt.RightButton and self.hover_element:
+            self.context_menu.popup(event.globalPos())
         super().mouseReleaseEvent(event)
     # ----------------------------------------------------
 
+    def widget_to_doc_coords(self, pos):
+        """Convert widget coordinates to document coordinates"""
+        if not self.pixmap or not self.page_dims:
+            return QPointF(0, 0)
+        
+        # Get widget and page dimensions
+        widget_size = self.size()
+        page_width = self.page_dims['points']['width']
+        page_height = self.page_dims['points']['height']
+        
+        # Calculate base scale (same as in paintEvent)
+        scale_x = widget_size.width() / page_width
+        scale_y = widget_size.height() / page_height
+        base_scale = min(scale_x, scale_y)
+        
+        # Calculate final scale with zoom
+        final_scale = base_scale * self.zoom_factor
+        
+        # Calculate scaled dimensions
+        scaled_width = page_width * final_scale
+        scaled_height = page_height * final_scale
+        
+        # Calculate centering offsets (same as in paintEvent)
+        x = (widget_size.width() - scaled_width) / 2
+        y = (widget_size.height() - scaled_height) / 2
+        
+        # Adjust for pan offset
+        x += self.pan_offset.x()
+        y += self.pan_offset.y()
+        
+        # Convert to document coordinates (0-1)
+        doc_x = (pos.x() - x) / scaled_width
+        doc_y = (pos.y() - y) / scaled_height
+        
+        logger.debug(f"Widget pos: {pos.x()}, {pos.y()}")
+        logger.debug(f"Offsets: {x}, {y}")
+        logger.debug(f"Scale: {final_scale}")
+        logger.debug(f"Doc coords: {doc_x}, {doc_y}")
+        
+        return QPointF(doc_x, doc_y)
+
+    def find_element_at_position(self, pos):
+        """Find element at the given document coordinates"""
+        if not self.page_structure or not self.show_bounding_boxes:
+            return None
+            
+        structure_data = self.page_structure.get('structure', {})
+        elements = structure_data.get('elements', [])
+        
+        # Debug output
+        logger.debug(f"Looking for element at position: {pos.x():.3f}, {pos.y():.3f}")
+        
+        # Check each element's bounding box
+        for element in elements:
+            coords = element.get('coordinates', [])
+            if len(coords) < 4:
+                continue
+                
+            # Create polygon from coordinates
+            points = []
+            for coord in coords:
+                points.append(QPointF(coord['x'], coord['y']))
+            polygon = QPolygonF(points)
+            
+            # Check if point is inside polygon
+            if polygon.containsPoint(pos, Qt.OddEvenFill):
+                logger.debug(f"Found element: {element.get('category')} (ID: {element.get('id')})")
+                logger.debug(f"Element coords: {coords}")
+                return element
+                
+        return None
+
+    def show_element_properties(self):
+        """Show properties dialog for current hover element"""
+        if not self.hover_element:
+            return
+            
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Element Properties")
+        layout = QVBoxLayout()
+        
+        # Create form layout for properties
+        form = QFormLayout()
+        
+        # Add basic properties
+        form.addRow("Category:", QLabel(self.hover_element.get('category', '')))
+        form.addRow("ID:", QLabel(str(self.hover_element.get('id', ''))))
+        
+        # Add text content
+        text_edit = QTextEdit()
+        text_edit.setPlainText(self.hover_element.get('content', {}).get('text', ''))
+        text_edit.setReadOnly(True)
+        text_edit.setMaximumHeight(100)
+        form.addRow("Text:", text_edit)
+        
+        # Add coordinates
+        coords = self.hover_element.get('coordinates', [])
+        coords_text = "\n".join(f"({c.get('x', 0):.3f}, {c.get('y', 0):.3f})" 
+                              for c in coords)
+        coords_edit = QTextEdit()
+        coords_edit.setPlainText(coords_text)
+        coords_edit.setReadOnly(True)
+        coords_edit.setMaximumHeight(80)
+        form.addRow("Coordinates:", coords_edit)
+        
+        # Add size information
+        size = self.hover_element.get('relative_size', {})
+        form.addRow("Width (mm):", QLabel(f"{size.get('width_mm', 0):.2f}"))
+        form.addRow("Height (mm):", QLabel(f"{size.get('height_mm', 0):.2f}"))
+        form.addRow("Point size:", QLabel(f"{size.get('point_size', 0):.2f}"))
+        
+        layout.addLayout(form)
+        
+        # Add OK button
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok)
+        buttons.accepted.connect(dialog.accept)
+        layout.addWidget(buttons)
+        
+        dialog.setLayout(layout)
+        dialog.exec_()
+
+    def change_element_category(self):
+        """Change category of current hover element"""
+        if not self.hover_element:
+            return
+            
+        action = self.sender()
+        if action:
+            new_category = action.data()
+            old_category = self.hover_element['category']
+            self.hover_element['category'] = new_category
+            logger.info(f"Changed element {self.hover_element['id']} category from {old_category} to {new_category}")
+            self.update()
 
 class TranslatedPageDisplayWidget(QWidget):
     zoomChanged = pyqtSignal(float)
@@ -4103,6 +4270,20 @@ class TranslatedPageDisplayWidget(QWidget):
                     doc.drawContents(painter, QRectF(0, 0, text_width, scaled_y1 - scaled_y0))
                     painter.restore()
                     
+            # Add highlight for hover element
+            if self.hover_element and self.show_bounding_boxes:
+                painter.setPen(QPen(QColor(255, 165, 0), 2))  # Orange highlight
+                coords = self.hover_element.get('coordinates', [])
+                if len(coords) >= 4:
+                    points = []
+                    for coord in coords:
+                        x = coord['x'] * scaled_width + offset_x
+                        y = coord['y'] * scaled_height + offset_y
+                        points.append(QPointF(x, y))
+                    painter.drawPolygon(QPolygonF(points))
+                    
+                    # Debug output for hover element
+                    logger.debug(f"Highlighting element: {self.hover_element.get('category')} - {self.hover_element.get('id')}")
         except Exception as e:
             logger.error(f"Error painting translated page: {str(e)}")
             if painter:
