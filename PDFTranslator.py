@@ -38,7 +38,7 @@ load_dotenv()
 
 COMPANY_NAME = "PALEOBYTES"
 PROGRAM_NAME = "PDFTranslator"
-PROGRAM_VERSION = "0.0.4"
+PROGRAM_VERSION = "0.0.5"
 
 # Set OpenAI API key the old way
 openai.api_key = os.getenv('OPENAI_API_KEY')
@@ -3059,6 +3059,8 @@ class PDFViewer(QMainWindow):
         
             if not output_path:
                 return
+            
+            logger.info(f"Exporting translations to PDF: {output_path}")
         
             # Show progress message
             self.status_label.showMessage(f"Exporting translations to PDF...")
@@ -3120,6 +3122,7 @@ class PDFViewer(QMainWindow):
             
             # For each page in the document
             for i in range(len(self.doc)):
+                logger.info(f"Processing page {i+1} of {len(self.doc)}")
                 # Skip pages that haven't been translated
                 cache_key = f"{i}_{current_language}"
                 if cache_key not in self.document_data['translations']:
@@ -3218,6 +3221,10 @@ class PDFViewer(QMainWindow):
                         
                         translated_text = trans_elem['content']['text']
                         point_size = orig_elem.get('relative_size', {}).get('point_size', 12)
+                        #logger.info(f"Relative size: {orig_elem.get('relative_size', {})}")
+                        #logger.info(f"Point size: {point_size}")
+                        #if point_size is None:
+                        point_size = 16
                         scaled_font_size = point_size * text_scale * pdf_scale_factor * scale
                         
                         text_rect = fitz.Rect(x0, y0, x1, y1)
@@ -4560,5 +4567,5 @@ Requirements:
 - keyring
 
 Build command:
-pyinstaller --name "PDFTranslator_v0.0.4.exe" --onefile --noconsole PDFTranslator.py
+pyinstaller --name "PDFTranslator_v0.0.5.exe" --onefile --noconsole PDFTranslator.py
 '''
